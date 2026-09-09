@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+server/pairings.json
+server/.pairings-*.tmp
+server/fcm-service-account.json
+server/fcm-test-sa.json
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+
+# Cloudflare Workers
+server-workers/.wrangler/
+server-workers/fcm-test-sa.json
+server-workers/wrangler.fcm-test.jsonc
+
+# IDE
+.idea/
+*.iml
+.DS_Store
