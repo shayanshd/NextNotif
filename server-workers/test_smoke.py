@@ -265,6 +265,17 @@ async def check_reverse_relay(sender, receiver):
     print("[ok] reverse relay receiver -> sender")
 
 
+async def check_binary_audio_relay(sender, receiver):
+    """Ephemeral PCM frames relay byte-for-byte in both directions."""
+    downstream = b"\x00\x01\xfe\xff" * 80
+    upstream = b"\x10\x00\xf0\xff" * 80
+    await sender.send(downstream)
+    assert await asyncio.wait_for(receiver.recv(), timeout=5) == downstream
+    await receiver.send(upstream)
+    assert await asyncio.wait_for(sender.recv(), timeout=5) == upstream
+    print("[ok] binary call audio relayed bidirectionally")
+
+
 async def check_auth_duplicate_ignored(sender, receiver):
     """A second auth message from an authenticated socket is ignored, not relayed."""
     await sender.send(json.dumps({"type": "auth", "token": "stale", "code": "000000"}))
@@ -543,6 +554,85 @@ async def check_send_uplink():
         await receiver2.close()
 
 
+async def check_fetch_ack():
+    """Fetch is repeatable; exact-ID ACK is authenticated and safe to retry."""
+    code = await fresh_code()
+    receiver, token = await connect_authed(f"/ws/receiver/{code}", code)
+    await receiver.close()
+    assert await wait_disconnected(code, "receiver"), "receiver slot not freed"
+    headers = {"X-NextNotif-Code": code, "X-NextNotif-Token": token}
+
+    async def send(label):
+        status, body = await http_post_json(
+            f"/send/{code}", json.dumps({"type": "sms", "data": {"body": label}}),
+        )
+        assert status == 200 and json.loads(body)["delivered"] is False, (status, body)
+
+    async def fetch():
+        status, body = await http_post_json("/fetch", "", headers)
+        assert status == 200, (status, body)
+        return json.loads(body)["events"]
+
+    async def ack(ids):
+        status, body = await http_post_json("/ack", json.dumps({"event_ids": ids}), headers)
+        assert status == 200, (status, body)
+        return json.loads(body)
+
+    await send("fetched one")
+    await send("fetched two")
+    events = await fetch()
+    assert [e["data"]["body"] for e in events] == ["fetched one", "fetched two"], events
+    ids = [e["event_id"] for e in events]
+    assert all(ids) and len(set(ids)) == 2, ids
+    assert await fetch() == events, "second fetch changed or deleted events"
+    status, body = await http_post_json(
+        f"/fetch/{code}", "", {"Authorization": f"Bearer {token}"},
+    )
+    assert status == 200 and json.loads(body)["events"] == events, (status, body)
+
+    # A different pairing's otherwise valid credential must not authorize this one.
+    other_code = await fresh_code()
+    other, other_token = await connect_authed(f"/ws/receiver/{other_code}", other_code)
+    await other.close()
+    for operation in ("fetch", "ack"):
+        for invalid_headers in ({}, {"X-NextNotif-Token": "wrong-token"},
+                                {"Authorization": f"Bearer {other_token}"}):
+            status, _ = await http_post_json(
+                f"/{operation}/{code}", json.dumps({"event_ids": ids}), invalid_headers,
+            )
+            assert status == 401, (operation, status)
+    assert await fetch() == events, "unauthorized operation modified the queue"
+
+    for invalid in ({}, {"event_ids": None}, {"event_ids": "not-list"},
+                    {"event_ids": [1]}, {"event_ids": [""]}, {"event_ids": [" \t"]},
+                    {"event_ids": ["unknown"] * 101}):
+        status, _ = await http_post_json("/ack", json.dumps(invalid), headers)
+        assert status == 400, (invalid, status)
+    status, _ = await http_post_json("/ack", "not-json", headers)
+    assert status == 400, status
+    assert await ack([]) == {"acknowledged": 0}
+    assert await ack(["unknown"] * 100) == {"acknowledged": 0}
+    assert await ack([f" {ids[0]} "]) == {"acknowledged": 0}, "ACK did not use exact IDs"
+    assert await fetch() == events, "invalid or empty ACK modified the queue"
+
+    # One event arrives after the fetch and another races the ACK itself.
+    # Neither ID was in the fetched snapshot; both must remain in either order.
+    await send("after fetch")
+    _, result = await asyncio.gather(send("concurrent with ack"), ack(ids + [ids[0]]))
+    assert result == {"acknowledged": 2}, result
+    assert await ack(ids) == {"acknowledged": 0}, "ACK retry was not idempotent"
+    remaining = await fetch()
+    assert [e["data"]["body"] for e in remaining] == ["after fetch", "concurrent with ack"], remaining
+    remaining_ids = [e["event_id"] for e in remaining]
+    status, body = await http_post_json(
+        f"/ack/{code}", json.dumps({"event_ids": remaining_ids}),
+        {"Authorization": f"Bearer {token}"},
+    )
+    assert status == 200 and json.loads(body) == {"acknowledged": 2}, (status, body)
+    assert await fetch() == [], "acknowledged events remained"
+    print("[ok] fetch repeats; authenticated exact-ID ACK retries and preserves concurrent events")
+
+
 async def check_persistence(code, auto_code):
     """Codes still report exists=true after all sockets are closed."""
     deadline = time.monotonic() + 5
@@ -770,9 +860,14 @@ async def poll(condition, timeout: float = 5.0, interval: float = 0.05):
     return False
 
 
-def _http_post(base: str, path: str, payload=None):
+def _http_post(base: str, path: str, payload=None, headers=None):
     data = payload.encode() if payload is not None else b""
-    req = urllib.request.Request(base + path, data=data, method="POST", headers=UA)
+    hdrs = dict(UA)
+    if headers:
+        hdrs.update(headers)
+    if payload is not None:
+        hdrs.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(base + path, data=data, method="POST", headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, resp.read()
@@ -808,7 +903,7 @@ async def fcm_fresh_code(dev):
     return json.loads(body)["code"]
 
 
-async def fc_connect(base, path, code, fcm_token=None, device_name=None):
+async def fc_connect(base, path, code, fcm_token=None, device_name=None, delivery_mode=None):
     """Handshake against an explicit worker base (the FCM checks run against
     their own local dev instance, not the main BASE)."""
     ws = await websockets.connect(f"{base.ws_base}{path}")
@@ -822,6 +917,8 @@ async def fc_connect(base, path, code, fcm_token=None, device_name=None):
     hs = json.loads(raw)
     assert hs.get("type") == "handshake", hs
     auth = {"type": "auth", "token": hs["token"], "code": code}
+    if delivery_mode is not None:
+        auth["delivery_mode"] = delivery_mode
     if fcm_token is not None:
         auth["fcm_token"] = fcm_token
     await ws.send(json.dumps(auth))
@@ -866,10 +963,8 @@ async def check_fcm_wake_offline(base, stub, public_key, code, fcm_token):
     assert msg["auth"] == "Bearer stub-access-token", msg["auth"]
     m = msg["body"]["message"]
     assert m["token"] == fcm_token, m
-    assert m["notification"]["body"] == "wake me up", m
-    assert "+15550001111" in m["notification"]["title"], m
-    assert m["data"]["nn"] == "1" and m["data"]["code"] == code and m["data"]["type"] == "sms", m
-    assert json.loads(m["data"]["data"])["body"] == "wake me up", m
+    assert "notification" not in m, m
+    assert m["data"] == {"nn": "1", "code": code, "wake": "1"}, m
     assert m["android"]["priority"] == "high", m
 
     call = stub.token_calls[-1]
@@ -896,6 +991,134 @@ async def check_fcm_rate_limit(base, stub, code):
     await asyncio.sleep(1.5)
     assert len(stub.messages) == before_msgs, "cooldown was not enforced"
     print("[ok] wake rate-limited per pairing")
+
+
+async def check_fcm_on_demand(base, stub, fcm_token):
+    """On-demand registration creates an FCM-only pairing, authenticates queue
+    drain, and wakes for every event instead of applying the WS cooldown."""
+    code = str(100000 + time.time_ns() % 900000)
+    assert (await fcm_status(base, code))["exists"] is False
+    loop = asyncio.get_running_loop()
+    status, body = await loop.run_in_executor(
+        None,
+        _http_post,
+        base.base,
+        "/fcm-register",
+        json.dumps({"fcm_token": fcm_token, "device_name": "Sleeping receiver"}),
+        {"X-NextNotif-Code": code},
+    )
+    assert status == 200, (status, body)
+    device_token = json.loads(body)["device_token"]
+    status_body = await fcm_status(base, code)
+    assert status_body["exists"] is True and status_body["receiver_has_fcm"] is True, status_body
+    before = len(stub.messages)
+    for ts in (201, 202):
+        status, body = await loop.run_in_executor(
+            None,
+            _http_post,
+            base.base,
+            f"/send/{code}",
+            json.dumps({"type": "sms", "data": {"from": "+15550001111", "body": f"push {ts}", "ts": ts}}),
+        )
+        assert status == 200, (status, body)
+    assert await poll(lambda: len(stub.messages) >= before + 2, timeout=10), "on-demand wake was cooled down"
+    wakes = [m["body"]["message"]["data"] for m in stub.messages[-2:]]
+    assert all(w == {"nn": "1", "code": code, "wake": "1"} for w in wakes), wakes
+
+    status, _ = await loop.run_in_executor(None, _http_post, base.base, f"/drain/{code}")
+    assert status == 401, status
+    status, body = await loop.run_in_executor(
+        None,
+        _http_post,
+        base.base,
+        "/drain",
+        None,
+        {"X-NextNotif-Code": code, "X-NextNotif-Token": device_token},
+    )
+    assert status == 200, (status, body)
+    events = json.loads(body)["events"]
+    assert [e["data"]["body"] for e in events] == ["push 201", "push 202"], events
+    event_ids = [e["event_id"] for e in events]
+    assert all(event_ids) and len(set(event_ids)) == 2, event_ids
+    status, body = await loop.run_in_executor(
+        None,
+        _http_post,
+        base.base,
+        f"/drain/{code}",
+        None,
+        {"X-NextNotif-Token": device_token},
+    )
+    assert status == 200 and json.loads(body)["events"] == [], (status, body)
+    print("[ok] FCM on-demand: every event wakes, authenticated drain clears queue")
+
+
+async def check_fcm_temporary_call_socket(base, stub, fcm_token):
+    """Temporary call sockets preserve durable fetch/ack and ephemeral media."""
+    code = await fcm_fresh_code(base)
+    loop = asyncio.get_running_loop()
+
+    async def post(path, payload=None, headers=None):
+        return await loop.run_in_executor(None, _http_post, base.base, path, payload, headers)
+
+    status, body = await post(
+        f"/fcm-register/{code}", json.dumps({"fcm_token": fcm_token}),
+    )
+    assert status == 200, (status, body)
+    token = json.loads(body)["device_token"]
+    headers = {"X-NextNotif-Token": token}
+    before_wakes = len(stub.messages)
+    status, body = await post(
+        f"/send/{code}", json.dumps({"type": "sms", "data": {"body": "before call socket"}}),
+    )
+    assert status == 200 and json.loads(body)["queued"] == 1, (status, body)
+    sender = await fc_connect(base, f"/ws/sender/{code}", code)
+    receiver = None
+    try:
+        receiver = await fc_connect(base, f"/ws/receiver/{code}", code, delivery_mode="fcm")
+        status, body = await post(f"/fetch/{code}", None, headers)
+        assert status == 200, (status, body)
+        backlog = json.loads(body)["events"]
+        assert [e["data"]["body"] for e in backlog] == ["before call socket"], backlog
+        status, body = await post(
+            f"/send/{code}", json.dumps({"type": "sms", "data": {"body": "during call socket"}}),
+        )
+        assert status == 200 and json.loads(body) == {"delivered": False, "queued": 2}, (status, body)
+        for typ in ("call", "relay_test"):
+            await sender.send(json.dumps({"type": typ, "data": {"body": f"queued {typ}"}}))
+        # Ordered WS input means this arrives only after the durable events.
+        await sender.send(json.dumps({"type": "call_control", "data": {"action": "answer"}}))
+        got = json.loads(await asyncio.wait_for(receiver.recv(), timeout=5))
+        assert got["type"] == "call_control" and got["data"]["action"] == "answer", got
+        await receiver.send(json.dumps({"type": "call_control", "data": {"action": "end"}}))
+        got = json.loads(await asyncio.wait_for(sender.recv(), timeout=5))
+        assert got["type"] == "call_control" and got["data"]["action"] == "end", got
+        await check_binary_audio_relay(sender, receiver)
+        assert await poll(lambda: len(stub.messages) >= before_wakes + 4, timeout=10), "durable FCM wake suppressed by call socket"
+        status, body = await post(f"/fetch/{code}", None, headers)
+        assert status == 200, (status, body)
+        events = json.loads(body)["events"]
+        assert [e["type"] for e in events] == ["sms", "sms", "call", "relay_test"], events
+        assert events[0] == backlog[0], "temporary socket changed the queued backlog"
+        status, body = await post(
+            f"/ack/{code}", json.dumps({"event_ids": [e["event_id"] for e in events]}), headers,
+        )
+        assert status == 200 and json.loads(body) == {"acknowledged": 4}, (status, body)
+        # Drop call control if its peer is gone: it must never become a stale
+        # durable command on the receiver's later reconnect.
+        await receiver.close()
+        receiver = None
+        assert await fcm_wait_status(base, code, {"receiver_connected": False})
+        await sender.send(json.dumps({"type": "call_control", "data": {"action": "answer"}}))
+        await sender.send(json.dumps({"type": "relay_test", "data": {"body": "after peer gone"}}))
+        assert await poll(lambda: len(stub.messages) >= before_wakes + 5, timeout=10)
+        status, body = await post(f"/fetch/{code}", None, headers)
+        assert status == 200, (status, body)
+        assert [e["type"] for e in json.loads(body)["events"]] == ["relay_test"], body
+        print("[ok] temporary FCM socket retains backlog, queues durable events, and relays only live control/audio")
+    finally:
+        if receiver is not None:
+            await receiver.close()
+        await sender.close()
 
 
 async def check_fcm_live_no_wake(base, stub, code, fcm_token):
@@ -994,6 +1217,7 @@ async def main() -> int:
                     ("sms relay", check_sms_relay),
                     ("call relay", check_call_relay),
                     ("reverse relay", check_reverse_relay),
+                    ("binary audio relay", check_binary_audio_relay),
                     ("duplicate auth ignored", check_auth_duplicate_ignored),
                 ):
                     ok, _ = await run_check(name, fn, sender, receiver)
@@ -1035,6 +1259,9 @@ async def main() -> int:
         ok, _ = await run_check("send uplink", check_send_uplink)
         failures += 0 if ok else 1
 
+        ok, _ = await run_check("fetch and ack", check_fetch_ack)
+        failures += 0 if ok else 1
+
         if code is None:
             print("FAIL: persistence: no created code to verify")
             failures += 1
@@ -1072,6 +1299,10 @@ async def main() -> int:
                         ok, _ = await run_check(name, fn)
                         failures += 0 if ok else 1
                 ok, _ = await run_check("fcm ws path", check_fcm_ws_path, fcm_dev, fcm_stub, FCM_TOKEN)
+                failures += 0 if ok else 1
+                ok, _ = await run_check("fcm on demand", check_fcm_on_demand, fcm_dev, fcm_stub, FCM_TOKEN)
+                failures += 0 if ok else 1
+                ok, _ = await run_check("fcm temporary call socket", check_fcm_temporary_call_socket, fcm_dev, fcm_stub, FCM_TOKEN)
                 failures += 0 if ok else 1
         finally:
             if fcm_dev is not None:

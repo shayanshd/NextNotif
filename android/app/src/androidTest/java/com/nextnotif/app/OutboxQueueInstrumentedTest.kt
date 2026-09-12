@@ -47,6 +47,21 @@ class OutboxQueueInstrumentedTest {
     }
 
     @Test
+    fun failedDeliveryCanPeekSameEventAgainUntilAcknowledged() {
+        OutboxQueue.enqueue(prefs, "111111", "sms", JSONObject().put("i", 1))
+        OutboxQueue.enqueue(prefs, "111111", "call", JSONObject().put("i", 2))
+
+        val firstAttempt = OutboxQueue.peek(prefs, "111111")!!
+        val retryAttempt = OutboxQueue.peek(prefs, "111111")!!
+        assertEquals(firstAttempt.id, retryAttempt.id)
+
+        assertTrue(OutboxQueue.acknowledge(prefs, "111111", retryAttempt.id))
+        val next = OutboxQueue.peek(prefs, "111111")!!
+        assertEquals("call", next.type)
+        assertEquals(2, next.data.getInt("i"))
+    }
+
+    @Test
     fun capacityDropsOldestEntries() {
         repeat(105) { i ->
             OutboxQueue.enqueue(prefs, "111111", "sms", JSONObject().put("i", i))

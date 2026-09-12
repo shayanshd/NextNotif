@@ -15,6 +15,7 @@ class SessionStoreTest {
             code = "ABC123",
             server = "ws://example.com:8000",
             deviceToken = "dev-tok-123",
+            relayEnabled = false,
         )
         SessionStore.saveTo(prefs, state)
 
@@ -23,6 +24,15 @@ class SessionStoreTest {
         assertEquals("ABC123", loaded.code)
         assertEquals("ws://example.com:8000", loaded.server)
         assertEquals("dev-tok-123", loaded.deviceToken)
+        assertEquals(false, loaded.relayEnabled)
+    }
+
+    @Test
+    fun legacyInstallDefaultsRelayIntentOn() {
+        val prefs = FakeSharedPreferences()
+        prefs.edit().putString("role", "SENDER").putString("code", "123456").apply()
+
+        assertTrue(SessionStore.loadFrom(prefs).relayEnabled)
     }
 
     @Test
@@ -92,7 +102,7 @@ class SessionStoreTest {
                     code = "222222",
                     role = Role.RECEIVER,
                     server = "wss://b:8000",
-                    transport = FirebaseRelay.TRANSPORT,
+                    transport = FcmOnDemand.TRANSPORT,
                 ),
             ),
         )
@@ -105,10 +115,12 @@ class SessionStoreTest {
         assertEquals("tok-a", loaded.pairings[0].deviceToken)
         assertEquals("Wife's phone", loaded.pairings[0].label)
         assertEquals("Wife's phone", loaded.pairings[0].displayName)
+        assertEquals(false, loaded.pairings[0].liveCallEnabled)
         assertEquals("222222", loaded.pairings[1].code)
         assertEquals(Role.RECEIVER, loaded.pairings[1].role)
         assertEquals("wss://b:8000", loaded.pairings[1].server)
-        assertEquals(FirebaseRelay.TRANSPORT, loaded.pairings[1].transport)
+        assertEquals(FcmOnDemand.TRANSPORT, loaded.pairings[1].transport)
+        assertEquals(true, loaded.pairings[1].isFcmOnDemand)
         assertNull(loaded.pairings[1].label)
         assertEquals("Pairing 222222", loaded.pairings[1].displayName)
     }
@@ -209,5 +221,44 @@ class SessionStoreTest {
         assertEquals(2, loaded.pairings.size)
         assertEquals(false, loaded.pairings[0].enabled)
         assertEquals(true, loaded.pairings[1].enabled)
+    }
+
+    @Test
+    fun liveCallOptInRoundTrips() {
+        val prefs = FakeSharedPreferences()
+        SessionStore.saveTo(
+            prefs,
+            SessionState(
+                pairings = listOf(
+                    PairingInfo(
+                        code = "111111",
+                        role = Role.SENDER,
+                        server = "wss://relay.example",
+                        liveCallEnabled = true,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(SessionStore.loadFrom(prefs).pairings.single().liveCallEnabled)
+    }
+
+    @Test
+    fun liveCallOptInDefaultsOffWhenKeyAbsent() {
+        val prefs = FakeSharedPreferences()
+        prefs.edit()
+            .putString(
+                "pairings",
+                """[{"code":"111111","role":"SENDER","server":"wss://relay.example"}]""",
+            )
+            .apply()
+
+        assertEquals(false, SessionStore.loadFrom(prefs).pairings.single().liveCallEnabled)
+    }
+
+    @Test
+    fun liveCallOptInIsForcedOffForReceiverRole() {
+        assertEquals(false, liveCallEnabledFor(Role.RECEIVER, requested = true))
+        assertEquals(true, liveCallEnabledFor(Role.SENDER, requested = true))
     }
 }

@@ -1,0 +1,3 @@
+allow magisk audio_device dir { search open read getattr }
+allow magisk audio_device chr_file { open read write ioctl getattr }
+allowxperm magisk audio_device chr_file ioctl *

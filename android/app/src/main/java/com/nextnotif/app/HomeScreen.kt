@@ -15,14 +15,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
@@ -32,6 +36,7 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -39,15 +44,21 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -57,6 +68,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -64,6 +76,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import java.text.DateFormat
+import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,9 +86,12 @@ fun HomeScreen(
     onToggleService: () -> Unit,
     onBattery: () -> Unit,
     onCallScreening: () -> Unit,
+    onGatewayDiagnostics: () -> Unit,
     onReset: () -> Unit,
     notifPermMissing: Boolean,
     onRequestNotifPerm: () -> Unit,
+    liveCallPermMissing: Boolean,
+    onFinishLiveCallSetup: () -> Unit,
     onAddPairing: () -> Unit,
     onOpenPairing: (PairingInfo) -> Unit,
     onEditPairing: (PairingInfo) -> Unit,
@@ -83,11 +100,29 @@ fun HomeScreen(
 ) {
     val connState by AppState.conn.collectAsState()
     val log by AppState.log.collectAsState()
+    val messages by AppState.messages.collectAsState()
     val connStates by AppState.connStates.collectAsState()
     val partnerStates by AppState.partnerStates.collectAsState()
     val pairingErrors by AppState.pairingErrors.collectAsState()
-    val running = connState != AppState.ConnState.IDLE
+    val liveCallCapabilities by GatewayCapabilityFeedback.states.collectAsState()
+    val running = connState != AppState.ConnState.IDLE &&
+        connState != AppState.ConnState.DISCONNECTED
     var showEntry by remember { mutableStateOf<AppState.Entry?>(null) }
+    var destination by remember { mutableStateOf(HomeDestination.OVERVIEW) }
+    var selectedMessagePairing by remember { mutableStateOf<String?>(null) }
+    var showClearHistoryConfirm by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val pairingNames = remember(pairings) { pairings.associate { it.code to it.displayName } }
+    val activity = log.filterNot(MessageStore::isHumanCommunication)
+    val filteredMessages = remember(messages, selectedMessagePairing) {
+        MessageStore.filterByPairing(messages, selectedMessagePairing)
+    }
+
+    LaunchedEffect(pairings, selectedMessagePairing) {
+        if (selectedMessagePairing != null && pairings.none { it.code == selectedMessagePairing }) {
+            selectedMessagePairing = null
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -95,10 +130,26 @@ fun HomeScreen(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         StatusDot(state = connState, size = 10.dp)
-                        Text(stringResource(R.string.home_title))
+                        Text(
+                            stringResource(
+                                when (destination) {
+                                    HomeDestination.OVERVIEW -> R.string.home_title
+                                    HomeDestination.MESSAGES -> R.string.home_messages_title
+                                    HomeDestination.ACTIVITY -> R.string.home_activity_title
+                                }
+                            )
+                        )
                     }
                 },
                 actions = {
+                    if (destination == HomeDestination.MESSAGES && messages.isNotEmpty()) {
+                        IconButton(onClick = { showClearHistoryConfirm = true }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = stringResource(R.string.home_messages_clear),
+                            )
+                        }
+                    }
                     var menuOpen by remember { mutableStateOf(false) }
                     Box {
                         IconButton(onClick = { menuOpen = true }) {
@@ -152,6 +203,14 @@ fun HomeScreen(
                                 },
                             )
                             DropdownMenuItem(
+                                text = { Text(stringResource(R.string.menu_gateway_diagnostics)) },
+                                leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    onGatewayDiagnostics()
+                                },
+                            )
+                            DropdownMenuItem(
                                 text = {
                                     Text(
                                         stringResource(R.string.menu_reset),
@@ -176,13 +235,47 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onAddPairing,
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text(stringResource(R.string.menu_add_pairing)) },
-            )
+            if (destination == HomeDestination.OVERVIEW) {
+                ExtendedFloatingActionButton(
+                    onClick = onAddPairing,
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text(stringResource(R.string.menu_add_pairing)) },
+                )
+            }
+        },
+        bottomBar = {
+            NavigationBar {
+                HomeDestination.entries.forEach { item ->
+                    NavigationBarItem(
+                        selected = destination == item,
+                        onClick = { destination = item },
+                        icon = {
+                            Icon(
+                                when (item) {
+                                    HomeDestination.OVERVIEW -> Icons.Default.Home
+                                    HomeDestination.MESSAGES -> Icons.Default.Notifications
+                                    HomeDestination.ACTIVITY -> Icons.Default.Info
+                                },
+                                contentDescription = null,
+                            )
+                        },
+                        label = {
+                            Text(
+                                stringResource(
+                                    when (item) {
+                                        HomeDestination.OVERVIEW -> R.string.home_nav_overview
+                                        HomeDestination.MESSAGES -> R.string.home_nav_messages
+                                        HomeDestination.ACTIVITY -> R.string.home_nav_activity
+                                    }
+                                )
+                            )
+                        },
+                    )
+                }
+            }
         },
     ) { innerPadding ->
+        key(destination) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -191,60 +284,120 @@ fun HomeScreen(
                 start = 16.dp,
                 end = 16.dp,
                 top = 0.dp,
-                bottom = 96.dp,
+                bottom = if (destination == HomeDestination.OVERVIEW) 96.dp else 24.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item {
-                RelayHeroCard(
-                    running = running,
-                    connState = connState,
-                    pairingsCount = pairings.size,
-                    partnersOnline = partnerStates.values.count {
-                        it.state == AppState.ConnState.CONNECTED || it.state == AppState.ConnState.LISTENING
-                    },
-                    onToggleService = onToggleService,
-                )
-            }
-            if (notifPermMissing) {
-                item { NotifPermBanner(onEnable = onRequestNotifPerm) }
-            }
-            item {
-                SectionHeader(stringResource(R.string.home_section_pairings), modifier = Modifier.padding(top = 8.dp))
-            }
-            if (pairings.isEmpty()) {
-                item { OnboardingCard(onAddPairing = onAddPairing) }
-            } else {
-                items(pairings, key = { it.code }) { p ->
-                    val partner = partnerStates[p.code] ?: AppState.PartnerState(AppState.ConnState.IDLE)
-                    PairingCard(
-                        pairing = p,
-                        ownState = connStates[p.code] ?: AppState.ConnState.IDLE,
-                        partnerState = partner.state,
-                        partnerName = partner.name,
-                        error = pairingErrors[p.code],
-                        enabled = p.enabled,
-                        onClick = { onOpenPairing(p) },
-                        onEdit = { onEditPairing(p) },
-                        onRemove = { onRemovePairing(p) },
-                        onToggle = { onTogglePairing(p) },
-                    )
+            when (destination) {
+                HomeDestination.OVERVIEW -> {
+                    item {
+                        RelayHeroCard(
+                            running = running,
+                            connState = connState,
+                            pairingsCount = pairings.size,
+                            partnersReady = partnerStates.values.count {
+                                it.state == AppState.ConnState.CONNECTED ||
+                                    it.state == AppState.ConnState.LISTENING ||
+                                    it.state == AppState.ConnState.ON_DEMAND
+                            },
+                            onToggleService = onToggleService,
+                        )
+                    }
+                    if (notifPermMissing) item { NotifPermBanner(onEnable = onRequestNotifPerm) }
+                    if (liveCallPermMissing) item {
+                        LiveCallPermBanner(onFinishSetup = onFinishLiveCallSetup)
+                    }
+                    item {
+                        SectionHeader(
+                            stringResource(R.string.home_section_pairings),
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    if (pairings.isEmpty()) {
+                        item { OnboardingCard(onAddPairing = onAddPairing) }
+                    } else {
+                        items(pairings, key = { it.code }) { p ->
+                            val partner = partnerStates[p.code]
+                                ?: AppState.PartnerState(AppState.ConnState.IDLE)
+                            PairingCard(
+                                pairing = p,
+                                ownState = connStates[p.code] ?: AppState.ConnState.IDLE,
+                                partnerState = partner.state,
+                                partnerName = partner.name,
+                                error = pairingErrors[p.code],
+                                notificationPermissionMissing = notifPermMissing,
+                                liveCallCapability = liveCallCapabilities[p.code],
+                                enabled = p.enabled,
+                                onClick = { onOpenPairing(p) },
+                                onEdit = { onEditPairing(p) },
+                                onRemove = { onRemovePairing(p) },
+                                onToggle = { onTogglePairing(p) },
+                            )
+                        }
+                    }
+                }
+                HomeDestination.MESSAGES -> {
+                    item {
+                        LogIntro(
+                            body = stringResource(R.string.home_messages_body),
+                        )
+                    }
+                    if (pairings.size > 1 && messages.isNotEmpty()) {
+                        item {
+                            MessagePairingFilters(
+                                pairings = pairings,
+                                selectedCode = selectedMessagePairing,
+                                onSelected = { selectedMessagePairing = it },
+                            )
+                        }
+                    }
+                    if (messages.isEmpty()) {
+                        item {
+                            EmptyLogState(
+                                icon = Icons.Default.Notifications,
+                                title = stringResource(R.string.home_messages_empty_title),
+                                body = stringResource(R.string.home_messages_empty_body),
+                            )
+                        }
+                    } else if (filteredMessages.isEmpty()) {
+                        item {
+                            EmptyLogState(
+                                icon = Icons.Default.Notifications,
+                                title = stringResource(R.string.home_messages_filter_empty_title),
+                                body = stringResource(R.string.home_messages_filter_empty_body),
+                            )
+                        }
+                    } else {
+                        items(
+                            filteredMessages,
+                            key = { "message-${it.ts}-${it.code}-${it.message.hashCode()}" },
+                        ) { entry ->
+                            MessageRow(entry, pairingNames)
+                        }
+                    }
+                }
+                HomeDestination.ACTIVITY -> {
+                    item {
+                        LogIntro(
+                            body = stringResource(R.string.home_activity_body),
+                        )
+                    }
+                    if (activity.isEmpty()) {
+                        item {
+                            EmptyLogState(
+                                icon = Icons.Default.Info,
+                                title = stringResource(R.string.home_activity_empty_title),
+                                body = stringResource(R.string.home_activity_empty_body),
+                            )
+                        }
+                    } else {
+                        items(activity, key = { "activity-${it.ts}-${it.message}" }) { entry ->
+                            LogRow(entry, pairingNames) { showEntry = entry }
+                        }
+                    }
                 }
             }
-            item {
-                SectionHeader(stringResource(R.string.home_activity), modifier = Modifier.padding(top = 8.dp))
-            }
-            if (log.isEmpty()) {
-                item { EmptyActivityCard() }
-            } else {
-                itemsIndexed(log) { _, entry ->
-                    LogRow(
-                        entry,
-                        pairingNames = pairings.associate { it.code to it.displayName },
-                        onClick = { showEntry = entry },
-                    )
-                }
-            }
+        }
         }
     }
     showEntry?.let { entry ->
@@ -256,6 +409,67 @@ fun HomeScreen(
             onDismiss = { showEntry = null },
         )
     }
+    if (showClearHistoryConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearHistoryConfirm = false },
+            title = { Text(stringResource(R.string.home_messages_clear_confirm_title)) },
+            text = { Text(stringResource(R.string.home_messages_clear_confirm_body)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        AppState.clearMessages(context)
+                        selectedMessagePairing = null
+                        showClearHistoryConfirm = false
+                    },
+                ) {
+                    Text(
+                        stringResource(R.string.home_messages_clear_confirm_action),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearHistoryConfirm = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+}
+
+private enum class HomeDestination { OVERVIEW, MESSAGES, ACTIVITY }
+
+@Composable
+private fun MessagePairingFilters(
+    pairings: List<PairingInfo>,
+    selectedCode: String?,
+    onSelected: (String?) -> Unit,
+) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        item {
+            FilterChip(
+                selected = selectedCode == null,
+                onClick = { onSelected(null) },
+                label = { Text(stringResource(R.string.home_messages_filter_all)) },
+            )
+        }
+        items(pairings, key = { it.code }) { pairing ->
+            FilterChip(
+                selected = selectedCode == pairing.code,
+                onClick = { onSelected(pairing.code) },
+                label = {
+                    Text(
+                        pairing.displayName,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+        }
+    }
 }
 
 @Composable
@@ -263,7 +477,7 @@ private fun RelayHeroCard(
     running: Boolean,
     connState: AppState.ConnState,
     pairingsCount: Int,
-    partnersOnline: Int,
+    partnersReady: Int,
     onToggleService: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
@@ -332,7 +546,7 @@ private fun RelayHeroCard(
                 )
                 if (running && pairingsCount > 0) {
                     HeroChip(
-                        label = stringResource(R.string.home_chip_partners_online, partnersOnline),
+                        label = stringResource(R.string.home_chip_partners_ready, partnersReady),
                         running = running,
                     )
                 }
@@ -367,6 +581,8 @@ private fun PairingCard(
     partnerState: AppState.ConnState,
     partnerName: String?,
     error: String?,
+    notificationPermissionMissing: Boolean,
+    liveCallCapability: GatewayCapability?,
     enabled: Boolean,
     onClick: () -> Unit,
     onEdit: () -> Unit,
@@ -379,15 +595,24 @@ private fun PairingCard(
     } else {
         Triple(Icons.Default.Notifications, cs.secondaryContainer, cs.onSecondaryContainer)
     }
-    val transportLabel = if (pairing.isFirebase) {
-        stringResource(
+    val transportLabel = when {
+        pairing.isFirebase -> stringResource(
             if (pairing.fbConfig.isNullOrBlank()) R.string.home_transport_firebase
             else R.string.home_transport_firebase_own
         )
-    } else {
-        serverHost(pairing.server)
+        pairing.isFcmOnDemand -> stringResource(R.string.home_transport_fcm)
+        else -> serverHost(pairing.server)
     }
     var menuOpen by remember { mutableStateOf(false) }
+    val readiness = pairingReadinessKind(
+        enabled = enabled,
+        role = pairing.role,
+        onDemand = pairing.isFcmOnDemand,
+        ownState = ownState,
+        partnerState = partnerState,
+        notificationPermissionMissing = notificationPermissionMissing,
+        error = error,
+    )
 
     Card(
         modifier = Modifier
@@ -490,44 +715,134 @@ private fun PairingCard(
                     modifier = Modifier.padding(end = 2.dp),
                 )
             }
-            Row(
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                StatusPill(
-                    state = ownState,
-                    prefix = stringResource(R.string.home_this_phone),
-                )
-                StatusPill(
-                    state = partnerState,
-                    prefix = partnerPrefix(partnerName) ?: stringResource(R.string.home_partner),
-                    partner = true,
+            PairingReadinessSummary(
+                kind = readiness,
+                pairingCode = pairing.code,
+                partnerName = partnerName,
+                error = error,
+                receiverOnDemand = pairing.role == Role.RECEIVER && pairing.isFcmOnDemand,
+                senderOnDemand = pairing.role == Role.SENDER && pairing.isFcmOnDemand,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+            )
+            if (enabled && pairing.role == Role.SENDER && pairing.liveCallEnabled) {
+                LiveCallCapabilitySummary(
+                    capability = liveCallCapability,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
                 )
             }
-            if (error != null) {
-                Row(
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(
-                        Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = cs.error,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        error,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = cs.error,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            } else {
-                Spacer(Modifier.height(12.dp))
-            }
+        }
+    }
+}
+
+@Composable
+private fun PairingReadinessSummary(
+    kind: PairingReadinessKind,
+    pairingCode: String,
+    partnerName: String?,
+    error: String?,
+    receiverOnDemand: Boolean,
+    senderOnDemand: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val cs = MaterialTheme.colorScheme
+    val dotState = when (kind) {
+        PairingReadinessKind.READY -> AppState.ConnState.CONNECTED
+        PairingReadinessKind.CONNECTING, PairingReadinessKind.CHECKING_PARTNER ->
+            AppState.ConnState.CONNECTING
+        PairingReadinessKind.WAITING_FOR_PARTNER -> AppState.ConnState.ON_DEMAND
+        PairingReadinessKind.NEEDS_NOTIFICATION_PERMISSION,
+        PairingReadinessKind.RETRYING,
+        PairingReadinessKind.OFFLINE -> AppState.ConnState.DISCONNECTED
+        PairingReadinessKind.PAUSED -> AppState.ConnState.IDLE
+    }
+    val title = when (kind) {
+        PairingReadinessKind.READY -> partnerName?.let {
+            stringResource(R.string.home_status_ready_for, it)
+        } ?: stringResource(R.string.home_status_ready)
+        PairingReadinessKind.CHECKING_PARTNER -> stringResource(R.string.home_status_checking_partner)
+        PairingReadinessKind.WAITING_FOR_PARTNER -> stringResource(R.string.home_status_waiting_partner)
+        PairingReadinessKind.NEEDS_NOTIFICATION_PERMISSION ->
+            stringResource(R.string.home_status_needs_permission)
+        PairingReadinessKind.CONNECTING -> stringResource(R.string.home_status_connecting)
+        PairingReadinessKind.RETRYING -> stringResource(R.string.home_status_reconnecting)
+        PairingReadinessKind.OFFLINE -> stringResource(R.string.home_status_offline)
+        PairingReadinessKind.PAUSED -> stringResource(R.string.home_status_paused)
+    }
+    val detail = when (kind) {
+        PairingReadinessKind.READY -> stringResource(
+            when {
+                receiverOnDemand -> R.string.home_status_ready_detail_receiver_fcm
+                senderOnDemand -> R.string.home_status_ready_detail_sender_fcm
+                else -> R.string.home_status_ready_detail
+            },
+        )
+        PairingReadinessKind.CHECKING_PARTNER ->
+            stringResource(R.string.home_status_checking_partner_detail)
+        PairingReadinessKind.WAITING_FOR_PARTNER ->
+            stringResource(R.string.home_status_waiting_partner_detail, pairingCode)
+        PairingReadinessKind.NEEDS_NOTIFICATION_PERMISSION ->
+            stringResource(R.string.home_status_needs_permission_detail)
+        PairingReadinessKind.CONNECTING -> stringResource(R.string.home_status_connecting_detail)
+        PairingReadinessKind.RETRYING -> when (pairingIssueKind(error.orEmpty())) {
+            PairingIssueKind.FIREBASE_CONFIG -> stringResource(R.string.home_issue_firebase_config)
+            PairingIssueKind.ALERT_REGISTRATION -> stringResource(R.string.home_issue_alert_registration)
+            PairingIssueKind.QUEUE_SYNC -> stringResource(R.string.home_issue_queue_sync)
+            PairingIssueKind.ACCESS_DENIED -> stringResource(R.string.home_issue_access_denied)
+            PairingIssueKind.NETWORK -> stringResource(R.string.home_issue_network)
+            PairingIssueKind.UNKNOWN -> stringResource(R.string.home_issue_unknown)
+        }
+        PairingReadinessKind.OFFLINE -> stringResource(R.string.home_status_offline_detail)
+        PairingReadinessKind.PAUSED -> stringResource(R.string.home_status_paused_detail)
+    }
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        StatusDot(state = dotState, size = 10.dp)
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.labelLarge, color = cs.onSurface)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun LiveCallCapabilitySummary(
+    capability: GatewayCapability?,
+    modifier: Modifier = Modifier,
+) {
+    val cs = MaterialTheme.colorScheme
+    val current = capability ?: GatewayCapability.CHECKING
+    val available = current == GatewayCapability.AVAILABLE
+    val title = stringResource(
+        if (available) R.string.home_live_ready else R.string.home_live_unavailable,
+    )
+    val detail = when (current) {
+        GatewayCapability.CHECKING -> stringResource(R.string.home_live_checking_detail)
+        GatewayCapability.AVAILABLE -> stringResource(R.string.home_live_ready_detail)
+        GatewayCapability.ROOT_UNAVAILABLE -> stringResource(R.string.home_live_root_detail)
+        GatewayCapability.HELPER_UNAVAILABLE -> stringResource(R.string.home_live_helper_detail)
+        GatewayCapability.PROBE_FAILED -> stringResource(R.string.home_live_probe_detail)
+    }
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            if (available) Icons.Default.Phone else Icons.Default.Warning,
+            contentDescription = null,
+            tint = if (available) cs.primary else cs.error,
+            modifier = Modifier.size(16.dp),
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (available) cs.primary else cs.error,
+            )
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
         }
     }
 }
@@ -631,33 +946,251 @@ private fun NotifPermBanner(onEnable: () -> Unit) {
 }
 
 @Composable
-private fun EmptyActivityCard() {
+private fun LiveCallPermBanner(onFinishSetup: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = cs.surfaceVariant),
+        colors = CardDefaults.cardColors(containerColor = cs.secondaryContainer),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 32.dp),
-            contentAlignment = Alignment.Center,
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(
-                    Icons.Default.Notifications,
-                    contentDescription = null,
-                    modifier = Modifier.size(36.dp),
-                    tint = cs.onSurfaceVariant.copy(alpha = 0.4f),
+            Icon(
+                Icons.Default.Phone,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = cs.onSecondaryContainer,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.live_call_perm_banner_title),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = cs.onSecondaryContainer,
                 )
                 Text(
-                    stringResource(R.string.home_activity_empty),
+                    stringResource(R.string.live_call_perm_banner_body),
                     style = MaterialTheme.typography.bodySmall,
-                    color = cs.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
+                    color = cs.onSecondaryContainer,
                 )
             }
+            FilledTonalButton(onClick = onFinishSetup) {
+                Text(stringResource(R.string.live_call_perm_finish))
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogIntro(body: String) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            body,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun EmptyLogState(icon: ImageVector, title: String, body: String) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 56.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(40.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            body,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+internal data class MessagePresentation(
+    val kind: AppState.CommunicationKind?,
+    val direction: AppState.CommunicationDirection?,
+    val identity: String,
+    val address: String? = null,
+    val body: String? = null,
+    val callState: String? = null,
+    val isRelayTest: Boolean = false,
+)
+
+/** Structured entries are exact; legacy entries retain the best detail that was persisted. */
+internal fun messagePresentation(entry: AppState.Entry): MessagePresentation {
+    entry.communication?.let { details ->
+        val address = details.address?.takeIf { it.isNotBlank() && it != "unknown" }
+        val name = details.name?.takeIf { it.isNotBlank() }
+        return MessagePresentation(
+            kind = details.kind,
+            direction = details.direction,
+            identity = name ?: address ?: "Unknown caller",
+            address = address?.takeIf { name != null && it != name },
+            body = details.body,
+            callState = details.callState,
+        )
+    }
+    if (entry.tag == "TEST") {
+        return MessagePresentation(
+            kind = null,
+            direction = AppState.CommunicationDirection.INCOMING,
+            identity = "Relay test",
+            body = entry.message,
+            isRelayTest = true,
+        )
+    }
+    val incoming = entry.tag == "IN"
+    val direction = if (incoming) {
+        AppState.CommunicationDirection.INCOMING
+    } else {
+        AppState.CommunicationDirection.OUTGOING
+    }
+    if (entry.message.startsWith("SMS ")) {
+        val content = entry.message
+            .removePrefix(if (incoming) "SMS from " else "SMS → ")
+        val separator = content.indexOf(": ")
+        return MessagePresentation(
+            kind = AppState.CommunicationKind.SMS,
+            direction = direction,
+            identity = if (separator >= 0) content.substring(0, separator) else content,
+            body = if (separator >= 0) content.substring(separator + 2) else null,
+        )
+    }
+    if (entry.message.startsWith("Call ")) {
+        val separator = if (incoming) " from " else " → "
+        val rest = entry.message.removePrefix("Call ")
+        return MessagePresentation(
+            kind = AppState.CommunicationKind.CALL,
+            direction = direction,
+            identity = rest.substringAfter(separator, "Unknown caller"),
+            callState = rest.substringBefore(separator).ifBlank { null },
+        )
+    }
+    return MessagePresentation(
+        kind = null,
+        direction = direction,
+        identity = entry.message,
+    )
+}
+
+@Composable
+private fun MessageRow(entry: AppState.Entry, pairingNames: Map<String, String>) {
+    val presentation = remember(entry) { messagePresentation(entry) }
+    val incoming = presentation.direction != AppState.CommunicationDirection.OUTGOING
+    val cs = MaterialTheme.colorScheme
+    val directionLabel = when {
+        presentation.isRelayTest -> stringResource(R.string.home_messages_direction_test)
+        incoming -> stringResource(R.string.home_messages_direction_received)
+        else -> stringResource(R.string.home_messages_direction_sent)
+    }
+    val kindLabel = when (presentation.kind) {
+        AppState.CommunicationKind.SMS -> stringResource(R.string.home_messages_kind_text)
+        AppState.CommunicationKind.CALL -> stringResource(R.string.home_messages_kind_call)
+        null -> null
+    }
+    val icon = when (presentation.kind) {
+        AppState.CommunicationKind.SMS -> if (incoming) Icons.Default.Notifications else Icons.Default.Send
+        AppState.CommunicationKind.CALL -> Icons.Default.Phone
+        null -> Icons.Default.Check
+    }
+    val accent = if (incoming) cs.primaryContainer else cs.secondaryContainer
+    val onAccent = if (incoming) cs.onPrimaryContainer else cs.onSecondaryContainer
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(cs.surfaceVariant.copy(alpha = 0.55f))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(accent),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(icon, contentDescription = null, tint = onAccent, modifier = Modifier.size(18.dp))
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    presentation.identity,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                presentation.address?.let { address ->
+                    Text(
+                        address,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                listOfNotNull(directionLabel, kindLabel).joinToString(" · "),
+                style = MaterialTheme.typography.labelMedium,
+                color = onAccent,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(accent)
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            )
+        }
+        presentation.body?.let { body ->
+            SelectionContainer {
+                Text(
+                    body,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.onSurface,
+                )
+            }
+        }
+        presentation.callState?.let { state ->
+            Text(
+                when (state) {
+                    "RINGING" -> stringResource(R.string.home_messages_call_ringing)
+                    "OFFHOOK", "ACTIVE" -> stringResource(R.string.home_messages_call_connected)
+                    "IDLE" -> stringResource(R.string.home_messages_call_ended)
+                    else -> stringResource(R.string.home_messages_call_update, state)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = cs.onSurface,
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                entry.code?.let { pairingNames[it] ?: "Pairing $it" }
+                    ?: stringResource(R.string.home_messages_pairing_unknown),
+                style = MaterialTheme.typography.labelMedium,
+                color = cs.onSurfaceVariant,
+            )
+            Text(
+                remember(entry.ts) {
+                    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                        .format(Date(entry.ts))
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = cs.onSurfaceVariant,
+            )
         }
     }
 }

@@ -16,6 +16,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -39,7 +40,9 @@ class FirebaseRelay(
     private val role: Role,
     val code: String,
     private val cfg: FirebaseCfg,
+    private val pairingSecret: String? = null,
     private val onState: (State) -> Unit,
+    private val onPartnerState: (online: Boolean, name: String?) -> Unit,
     private val onIncoming: (type: String, data: JSONObject) -> Unit,
 ) {
     enum class State { CONNECTING, CONNECTED, DISCONNECTED }
@@ -57,8 +60,11 @@ class FirebaseRelay(
     private var auth: FirebaseAuth? = null
     private var eventsRef: DatabaseReference? = null
     private var infoRef: DatabaseReference? = null
+    private var presenceRef: DatabaseReference? = null
+    private var partnerPresenceRef: DatabaseReference? = null
     private var eventsListener: ValueEventListener? = null
     private var infoListener: ValueEventListener? = null
+    private var partnerPresenceListener: ValueEventListener? = null
     private var running = false
     private val seen = mutableSetOf<String>()
     private var primed = false
@@ -71,11 +77,24 @@ class FirebaseRelay(
         val wasAuthed = authed
         authed = it.currentUser != null
         Log.d(TAG, "[${code}] authStateChanged: ${wasAuthed} -> $authed (user=${it.currentUser?.uid ?: "none"})")
-        if (authed) failed = null
+        if (authed) {
+            failed = null
+            // RTDB rules require authentication. Attaching this listener before
+            // sign-in permanently cancels it with Permission denied, so attach
+            // only after FirebaseAuth has produced a user.
+            attachEventsListener()
+            attachPresence()
+        }
         emitState()
     }
 
     var failed: String? = null
+        private set
+
+    // Authentication/configuration failures will not heal on a timer. Expose
+    // that distinction so the service does not repeatedly submit credentials
+    // and trigger Firebase's per-device abuse throttle.
+    var shouldRetry: Boolean = true
         private set
 
     private fun initApp(options: FirebaseOptions): FirebaseApp {
@@ -101,13 +120,15 @@ class FirebaseRelay(
         primed = false
         seen.clear()
         failed = null
-        val options = FirebaseOptions.Builder()
+        shouldRetry = true
+        val optionsBuilder = FirebaseOptions.Builder()
             .setApiKey(cfg.apiKey)
             .setDatabaseUrl(cfg.databaseUrl)
             // firebase-common 21+ crashes at build() without these two.
             .setApplicationId(cfg.appId)
             .setProjectId(cfg.projectId)
-            .build()
+        cfg.messagingSenderId?.let(optionsBuilder::setGcmSenderId)
+        val options = optionsBuilder.build()
         val app = initApp(options)
         Log.i(TAG, "[${code}] FirebaseApp initialized: ${app.name}")
         val db = FirebaseDatabase.getInstance(app, cfg.databaseUrl)
@@ -119,38 +140,15 @@ class FirebaseRelay(
             db.setPersistenceEnabled(true)
         }
         database = db
+        // stop() takes the shared FirebaseDatabase instance offline. A later
+        // relay object receives that same cached instance, so every start must
+        // explicitly reverse the previous goOffline().
+        db.goOnline()
 
         // Note: getReference(...) — with the String overload present, Kotlin
         // does not map it to property-style reference(...).
         val events = db.getReference("pairings/$code/events")
         eventsRef = events
-        val eventsListener = object : ValueEventListener {
-            override fun onDataChange(snap: DataSnapshot) {
-                if (!running) return
-                if (!primed) {
-                    Log.i(TAG, "[${code}] events first snapshot received, children=${snap.childrenCount}")
-                    // Initial snapshot is history, not new events.
-                    snap.children.forEach { it.key?.let(seen::add) }
-                    primed = true
-                    return
-                }
-                snap.children.forEach { child ->
-                    val key = child.key ?: return@forEach
-                    if (key in seen) return@forEach
-                    seen.add(key)
-                    deliver(child.value)
-                }
-            }
-
-            override fun onCancelled(error: DatabaseError) {
-                if (!running) return
-                Log.w(TAG, "[${code}] events listener cancelled: ${error.message}")
-                failed = "Relay access denied: ${error.message}"
-                emitState()
-            }
-        }
-        this.eventsListener = eventsListener
-        events.addValueEventListener(eventsListener)
 
         val info = db.getReference(".info/connected")
         infoRef = info
@@ -179,8 +177,85 @@ class FirebaseRelay(
         scope.launch { signIn(auth) }
     }
 
+    private fun attachEventsListener() {
+        if (!running || !authed || eventsListener != null) return
+        val events = eventsRef ?: return
+        val eventsListener = object : ValueEventListener {
+            override fun onDataChange(snap: DataSnapshot) {
+                if (!running) return
+                if (!primed) {
+                    Log.i(TAG, "[${code}] events first snapshot received, children=${snap.childrenCount}")
+                    // Initial snapshot is history, not new events.
+                    snap.children.forEach { it.key?.let(seen::add) }
+                    primed = true
+                    return
+                }
+                snap.children.forEach { child ->
+                    val key = child.key ?: return@forEach
+                    if (key in seen) return@forEach
+                    seen.add(key)
+                    deliver(child.value)
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                if (!running) return
+                Log.w(TAG, "[${code}] events listener cancelled: ${error.message}")
+                failed = "Relay access denied: ${error.message}"
+                shouldRetry = false
+                emitState()
+            }
+        }
+        this.eventsListener = eventsListener
+        events.addValueEventListener(eventsListener)
+    }
+
+    /**
+     * Firebase has no relay server whose status endpoint can identify the peer,
+     * so publish one presence record per role. onDisconnect removes our record
+     * server-side even when Android kills the process or connectivity vanishes.
+     */
+    private fun attachPresence() {
+        if (!running || !authed || presenceRef != null) return
+        val db = database ?: return
+        val myRole = role.name.lowercase()
+        val partnerRole = if (role == Role.SENDER) "receiver" else "sender"
+        val mine = db.getReference("pairings/$code/presence/$myRole")
+        val partner = db.getReference("pairings/$code/presence/$partnerRole")
+        presenceRef = mine
+        partnerPresenceRef = partner
+
+        mine.onDisconnect().removeValue()
+        mine.setValue(
+            mapOf(
+                "online" to true,
+                "device_name" to deviceName(),
+            ),
+        )
+
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snap: DataSnapshot) {
+                if (!running) return
+                val online = snap.child("online").getValue(Boolean::class.java) == true
+                val name = snap.child("device_name").getValue(String::class.java)
+                    ?.takeIf { it.isNotBlank() }
+                onPartnerState(online, name)
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                if (!running) return
+                Log.w(TAG, "[${code}] partner presence listener cancelled: ${error.message}")
+                onPartnerState(false, null)
+            }
+        }
+        partnerPresenceListener = listener
+        partner.addValueEventListener(listener)
+    }
+
     private suspend fun signIn(auth: FirebaseAuth) {
-        Log.i(TAG, "[${code}] signIn: attempting anonymous auth (role=$role)")
+        val secret = pairingSecret?.takeIf { it.length >= 6 }
+        val authLabel = if (secret != null) "pairing credential" else "anonymous auth"
+        Log.i(TAG, "[${code}] signIn: attempting $authLabel (role=$role)")
         // Quick reachability probe: before spending the full auth timeout, do a
         // single TLS+HTTP probe to a Google endpoint the SDK depends on. On
         // networks that intercept HTTPS (corporate VPN, captive portal, national
@@ -189,22 +264,28 @@ class FirebaseRelay(
         // in <3s and gives a clear message instead of hanging.
         val reachable = runCatching {
             withTimeoutOrNull(4_000L) {
-                val probeClient = OkHttpClient.Builder()
-                    .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-                    .build()
-                val req = Request.Builder()
-                    .url("https://www.googleapis.com/identitytoken/v1")
-                    .build()
-                probeClient.newCall(req).execute().use { resp ->
-                    // Any response (even 4xx) means TCP+TLS succeeded and we got
-                    // back from Google — the endpoint host is reachable.
-                    Log.i(TAG, "[${code}] google reachability probe: http=${resp.code}")
-                    true
+                // This relay's scope uses Main because Firebase listeners are
+                // UI-facing. OkHttp's synchronous execute() must explicitly run
+                // on IO or Android throws NetworkOnMainThreadException and the
+                // app incorrectly reports a connection failure.
+                withContext(Dispatchers.IO) {
+                    val probeClient = OkHttpClient.Builder()
+                        .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
+                    val req = Request.Builder()
+                        .url("https://www.googleapis.com/identitytoken/v1")
+                        .build()
+                    probeClient.newCall(req).execute().use { resp ->
+                        // Any response (even 4xx) means TCP+TLS succeeded and we got
+                        // back from Google — the endpoint host is reachable.
+                        Log.i(TAG, "[${code}] google reachability probe: http=${resp.code}")
+                        true
+                    }
                 }
             } ?: false
         }.getOrElse {
-            Log.w(TAG, "[${code}] google reachability probe failed: ${it.message}")
+            Log.w(TAG, "[${code}] google reachability probe failed: ${it::class.simpleName}: ${it.message}")
             false
         }
         if (!reachable) {
@@ -217,11 +298,37 @@ class FirebaseRelay(
         // are never observed and the relay sits in CONNECTING forever.
         val completed = withTimeoutOrNull(AUTH_TIMEOUT_MS) {
             try {
-                auth.signInAnonymously().await()
+                if (secret != null) {
+                    // Compatibility with the original, code-isolated RTDB
+                    // rules: auth.token.email must equal <code>@nextnotif.local.
+                    // Existing installations already retain this secret.
+                    auth.signInWithEmailAndPassword("$code@nextnotif.local", secret).await()
+                } else {
+                    auth.signInAnonymously().await()
+                }
                 true
             } catch (e: Exception) {
                 if (!running) return@withTimeoutOrNull false
-                Log.w(TAG, "[${code}] anonymous auth failed: ${e.message}")
+                Log.w(TAG, "[${code}] $authLabel failed: ${e.message}")
+                val detail = e.message.orEmpty()
+                shouldRetry = false
+                failed = when {
+                    detail.contains("403", ignoreCase = true) ||
+                        detail.contains("Json conversion failed", ignoreCase = true) ->
+                        "Firebase Authentication was rejected by Google on this network"
+                    detail.contains("unusual activity", ignoreCase = true) ||
+                        detail.contains("TOO_MANY_ATTEMPTS", ignoreCase = true) ->
+                        "Firebase temporarily blocked sign-in after too many attempts; wait before restarting"
+                    secret != null && (
+                        detail.contains("credential is incorrect", ignoreCase = true) ||
+                            detail.contains("INVALID_PASSWORD", ignoreCase = true) ||
+                            detail.contains("wrong password", ignoreCase = true)
+                        ) -> "Firebase pairing secret is not valid for this pairing"
+                    detail.contains("restricted to administrators", ignoreCase = true) ||
+                        detail.contains("OPERATION_NOT_ALLOWED", ignoreCase = true) ->
+                        "Firebase sign-in method is disabled for this project"
+                    else -> "Firebase sign-in failed: ${detail.ifBlank { e::class.simpleName ?: "unknown error" }}"
+                }
                 false
             }
         }
@@ -303,13 +410,22 @@ class FirebaseRelay(
         // would schedule a reconnect for a relay the user just stopped).
         if (eventsRef != null && eventsListener != null) eventsRef!!.removeEventListener(eventsListener!!)
         if (infoRef != null && infoListener != null) infoRef!!.removeEventListener(infoListener!!)
+        if (partnerPresenceRef != null && partnerPresenceListener != null) {
+            partnerPresenceRef!!.removeEventListener(partnerPresenceListener!!)
+        }
+        // The registered onDisconnect is the reliable cleanup path. This
+        // immediate write makes an intentional stop update the peer promptly.
+        runCatching { presenceRef?.removeValue() }
         runCatching { auth?.removeAuthStateListener(authListener) }
         runCatching { database?.goOffline() }
         runCatching { auth?.signOut() }
         eventsRef = null
         infoRef = null
+        presenceRef = null
+        partnerPresenceRef = null
         eventsListener = null
         infoListener = null
+        partnerPresenceListener = null
         database = null
         auth = null
         authed = false

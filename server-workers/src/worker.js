@@ -1,9 +1,13 @@
 import { DurableObject } from 'cloudflare:workers';
+import { SecurePairingStore } from './secure-pairing-store.mjs';
+import { authorizeSecure, AuthorizationError } from './secure-pairing.mjs';
 
 const CODE_RE = /^\d{6}$/;
 const AUTH_TIMEOUT_MS = 5000;
 const MAX_DEVICE_TOKENS = 4;
 const MAX_QUEUED = 50;
+const MAX_ACK_EVENT_IDS = 100;
+const FCM_DURABLE_TYPES = new Set(['sms', 'call', 'relay_test']);
 // One wake per pairing/role per window: events pile up in the queue meanwhile,
 // so a single reconnect is all the catch-up needs.
 const FCM_WAKE_COOLDOWN_MS = 30_000;
@@ -24,31 +28,6 @@ function isValidFcmToken(v) {
     v === v.trim() &&
     !v.includes(' ')
   );
-}
-
-// Title/body for the system-shown notification (the app process is dead in
-// that case, so the OS-rendered notification is the only record of the event).
-function notificationFor(evt) {
-  const data = evt && typeof evt.data === 'object' && evt.data !== null ? evt.data : {};
-  if (evt && evt.type === 'sms') {
-    const from = String(data.from || 'unknown');
-    const label = data.name ? `${data.name} (${from})` : from;
-    return { title: `NextNotif: Text from ${label}`, body: String(data.body || '').slice(0, 200) };
-  }
-  if (evt && evt.type === 'call') {
-    const number = String(data.number || 'unknown');
-    const label = data.name ? `${data.name} (${number})` : number;
-    const title =
-      data.state === 'RINGING'
-        ? `NextNotif: Incoming call from ${label}`
-        : data.state === 'OFFHOOK'
-          ? `NextNotif: Call from ${label} connected`
-          : data.state === 'IDLE'
-            ? `NextNotif: Call from ${label} ended`
-            : `NextNotif: Call ${data.state || ''} from ${label}`.trim();
-    return { title, body: number };
-  }
-  return { title: `NextNotif: ${evt && evt.type ? evt.type : 'event'}`, body: '' };
 }
 
 // Forward a request (WS upgrade or otherwise) to the pairing's DO instance.
@@ -73,6 +52,16 @@ async function forwardSend(env, request, code) {
   const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
   const fwd = new Request(url, { method: request.method, headers: request.headers, body });
   return inst.fetch(fwd);
+}
+
+// Forward a short authenticated HTTP receiver operation to its pairing DO.
+// Materialize the body for the same stream-ownership reason as /send.
+async function forwardReceiverHttp(env, request, code, operation) {
+  const url = new URL(request.url);
+  url.pathname = `/${operation}/${code}`;
+  const body = await request.text();
+  const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
+  return inst.fetch(new Request(url, { method: 'POST', headers: request.headers, body }));
 }
 
 // 16 random bytes, base64url-encoded (same shape as Python's secrets.token_urlsafe(16)).
@@ -156,9 +145,32 @@ export class RelayPairing extends DurableObject {
 
   // Atomic: serialized per-instance, so only one caller can claim a fresh code.
   async tryClaim() {
+    if (await this.securityMode() !== 'legacy') return false;
     const existing = await this.state.storage.get('paired');
     if (existing != null) return false;
     await this.state.storage.put('paired', '1');
+    return true;
+  }
+
+  async securityMode() {
+    const values = await this.state.storage.get(['securityMode', 'secureRecord']);
+    const mode = values.get('securityMode');
+    if ((mode == null || mode === 'legacy') && values.get('secureRecord') == null) return 'legacy';
+    if (mode === 'invite_v1' && values.get('secureRecord') != null) return 'invite_v1';
+    return 'quarantined';
+  }
+
+  async authorizeHttp(request, role) {
+    const mode = await this.securityMode();
+    if (mode === 'legacy') return false;
+    if (mode !== 'invite_v1') throw new AuthorizationError();
+    const record = await new SecurePairingStore(this.state.storage).read();
+    const deviceId = request.headers.get('X-NextNotif-Device-Id');
+    const authorization = request.headers.get('Authorization') || '';
+    const token = request.headers.get('X-NextNotif-Token') ||
+      (authorization.startsWith('Bearer ') ? authorization.slice(7) : '');
+    const credential = record.credentials[deviceId];
+    await authorizeSecure(record, deviceId, token, role || credential?.role);
     return true;
   }
 
@@ -232,6 +244,22 @@ export class RelayPairing extends DurableObject {
     await this.state.storage.put('queue', JSON.stringify(queue));
   }
 
+  async getDeliveryModes() {
+    const raw = await this.state.storage.get('deliveryModes');
+    try {
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  async setDeliveryMode(role, mode) {
+    if ((role !== 'sender' && role !== 'receiver') || (mode !== 'ws' && mode !== 'fcm')) return;
+    const modes = await this.getDeliveryModes();
+    modes[role] = mode;
+    await this.state.storage.put('deliveryModes', JSON.stringify(modes));
+  }
+
   async getFcm() {
     const raw = await this.state.storage.get('fcm');
     try {
@@ -271,6 +299,16 @@ export class RelayPairing extends DurableObject {
     await this.state.storage.put('fcm', JSON.stringify(fcm));
   }
 
+  async issueDeviceToken(presented) {
+    const tokens = await this.getTokens();
+    if (typeof presented === 'string' && tokens.includes(presented)) return presented;
+    const issued = randomDeviceToken();
+    tokens.push(issued);
+    if (tokens.length > MAX_DEVICE_TOKENS) tokens.splice(0, tokens.length - MAX_DEVICE_TOKENS);
+    await this.putTokens(tokens);
+    return issued;
+  }
+
   async fcmAccessToken(sa) {
     if (this._fcmToken && this._fcmTokenExpiry > Date.now()) return this._fcmToken;
     const tokenUrl = this.env.FCM_TOKEN_URL || 'https://oauth2.googleapis.com/token';
@@ -289,11 +327,13 @@ export class RelayPairing extends DurableObject {
   }
 
   // Best-effort kill-recovery wake: the receiver's socket is dead, so a
-  // high-priority FCM message goes to its registered token — the OS wakes the
-  // phone (system notification when the process is dead; the app's own
-  // branded notification when it is alive), the relay service reconnects, and
-  // the queued events drain. Rate-limited per pairing/role. Never throws into
-  // the relay path.
+  // high-priority, wake-only FCM message goes to its registered token. It never
+  // contains SMS/caller content or event metadata; the app fetches queued data
+  // afterward through its authenticated HTTPS drain. Mixed
+  // notification+data messages bypass onMessageReceived while backgrounded;
+  // data-only lets the app re-arm its relay immediately, drain the queue, and
+  // display the event through its normal notification path. Rate-limited per
+  // pairing/role. Never throws into the relay path.
   async maybeFcmWake(role, evt) {
     try {
       const saRaw = this.env.FCM_SERVICE_ACCOUNT;
@@ -303,9 +343,12 @@ export class RelayPairing extends DurableObject {
       if (!token) return;
       const now = Date.now();
       const last = (await this.getLastWake())[role] || 0;
-      if (now - last < FCM_WAKE_COOLDOWN_MS) return;
+      const onDemand = (await this.getDeliveryModes())[role] === 'fcm';
+      // A persistent WebSocket needs only one wake to reconnect and drain its
+      // queue. An on-demand receiver has no socket, so every user-visible
+      // event needs its own FCM delivery.
+      if (!onDemand && now - last < FCM_WAKE_COOLDOWN_MS) return;
       const sa = JSON.parse(saRaw);
-      const { title, body } = notificationFor(evt);
       const bearer = await this.fcmAccessToken(sa);
       const base = (this.env.FCM_SEND_URL || 'https://fcm.googleapis.com').replace(/\/$/, '');
       const resp = await fetch(`${base}/v1/projects/${sa.project_id}/messages:send`, {
@@ -314,14 +357,12 @@ export class RelayPairing extends DurableObject {
         body: JSON.stringify({
           message: {
             token,
-            notification: { title, body },
             data: {
               nn: '1',
               code: this.code,
-              type: evt && evt.type ? String(evt.type) : 'unknown',
-              data: JSON.stringify(evt && evt.data && typeof evt.data === 'object' ? evt.data : {}),
+              wake: '1',
             },
-            android: { priority: 'high', defaultActivityName: 'com.nextnotif.app.MainActivity' },
+            android: { priority: 'high' },
           },
         }),
       });
@@ -347,18 +388,21 @@ export class RelayPairing extends DurableObject {
   // (re)connect. DO methods never interleave, so the live/queue decision and
   // the queue mutation are consistent with each other.
   async deliverToReceiver(type, data) {
-    const out = JSON.stringify({ type, from: 'sender', data: data ?? null });
+    const eventId = randomToken();
+    const out = JSON.stringify({ type, from: 'sender', event_id: eventId, data: data ?? null });
+    const useFcmQueue = FCM_DURABLE_TYPES.has(type) &&
+      (await this.getDeliveryModes()).receiver === 'fcm';
     const sockets = this.liveSockets();
     const receiver = sockets.receiver;
-    if (receiver && receiver.readyState === WebSocket.OPEN) {
+    if (receiver && receiver.readyState === WebSocket.OPEN && !useFcmQueue) {
       receiver.send(out);
       return { delivered: true, queued: 0 };
     }
     const queue = await this.getQueue();
-    queue.push({ ts: Date.now(), out });
+    queue.push({ ts: Date.now(), event_id: eventId, out });
     while (queue.length > MAX_QUEUED) queue.shift();
     await this.putQueue(queue);
-    await this.wakeWithTimeout({ type, data: data ?? null });
+    await this.wakeWithTimeout({ type, event_id: eventId, data: data ?? null });
     return { delivered: false, queued: queue.length };
   }
 
@@ -403,6 +447,24 @@ export class RelayPairing extends DurableObject {
     const url = new URL(request.url);
     const isWsUpgrade = (request.headers.get('Upgrade') || '').toLowerCase() === 'websocket';
     const parts = url.pathname.split('/').filter(Boolean);
+    const operation = parts[0];
+    let secure = false;
+    try {
+      if (operation === 'ws') {
+        // Secure WS support follows HTTP guards. Until then deny before slot
+        // replacement, pending metadata, or legacy token minting can occur.
+        if (await this.securityMode() !== 'legacy') throw new AuthorizationError();
+      } else if (operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status'].includes(operation)) {
+        secure = await this.authorizeHttp(request, operation === 'send' ? 'sender' : operation === 'status' ? null : 'receiver');
+      }
+    } catch (error) {
+      if (!(error instanceof AuthorizationError)) throw error;
+      return Response.json({ error: 'pairing authorization failed' }, { status: 401 });
+    }
+
+    if (operation === 'status' && parts.length === 2 && isValidCode(parts[1])) {
+      return Response.json(await this.getStatus());
+    }
 
     if (
       isWsUpgrade &&
@@ -474,6 +536,93 @@ export class RelayPairing extends DurableObject {
       return Response.json(result);
     }
 
+    if (
+      request.method === 'POST' &&
+      parts.length === 2 &&
+      parts[0] === 'fcm-register' &&
+      isValidCode(parts[1])
+    ) {
+      const code = parts[1];
+      let body = null;
+      try {
+        body = await request.json();
+      } catch {
+        body = null;
+      }
+      if (!body || !isValidFcmToken(body.fcm_token)) {
+        return Response.json({ error: 'invalid body' }, { status: 400 });
+      }
+      // FCM-only pairings never open a bootstrap WebSocket. Let the receiver's
+      // first valid registration claim the six-digit code atomically inside
+      // this Durable Object, matching the typed-code WebSocket behavior.
+      await this.state.storage.put('paired', '1');
+      this.code = code;
+      await this.storeFcmToken('receiver', body.fcm_token);
+      await this.setDeliveryMode('receiver', 'fcm');
+      const name = typeof body.device_name === 'string' ? body.device_name.trim().slice(0, 64) : '';
+      if (name) {
+        const names = await this.getNames();
+        names.receiver = name;
+        await this.putNames(names);
+      }
+      const issued = secure ? (request.headers.get('X-NextNotif-Token') ||
+        (request.headers.get('Authorization') || '').slice(7)) : await this.issueDeviceToken(body.device_token);
+      return Response.json({ device_token: issued });
+    }
+
+    if (
+      request.method === 'POST' &&
+      parts.length === 2 &&
+      (parts[0] === 'drain' || parts[0] === 'fetch' || parts[0] === 'ack') &&
+      isValidCode(parts[1])
+    ) {
+      const paired = await this.state.storage.get('paired');
+      if (paired == null) return Response.json({ error: 'unknown pairing' }, { status: 404 });
+      const auth = request.headers.get('Authorization') || '';
+      const presented = request.headers.get('X-NextNotif-Token') ||
+        (auth.startsWith('Bearer ') ? auth.slice(7) : '');
+      const tokens = await this.getTokens();
+      if (!secure && (!presented || !tokens.includes(presented))) {
+        return Response.json({ error: 'unknown device token' }, { status: 401 });
+      }
+      if (parts[0] === 'ack') {
+        let body = null;
+        try {
+          body = await request.json();
+        } catch {
+          body = null;
+        }
+        if (
+          !body || typeof body !== 'object' || Array.isArray(body) ||
+          !Array.isArray(body.event_ids) || body.event_ids.length > MAX_ACK_EVENT_IDS ||
+          body.event_ids.some((id) => typeof id !== 'string' || id.trim().length === 0)
+        ) {
+          return Response.json({ error: 'invalid body' }, { status: 400 });
+        }
+        const ids = new Set(body.event_ids);
+        // Read the CURRENT queue, not the previous fetch snapshot. Storage
+        // input gates keep this read/filter/write atomic; no external I/O is
+        // awaited between the read and write. New, unacknowledged IDs survive.
+        const queue = await this.getQueue();
+        const retained = queue.filter((item) => !ids.has(item.event_id));
+        const acknowledged = queue.length - retained.length;
+        if (acknowledged > 0) await this.putQueue(retained);
+        return Response.json({ acknowledged });
+      }
+      const queue = await this.getQueue();
+      // Legacy clients keep the destructive drain contract. New clients
+      // fetch repeatedly until they have durably saved and acknowledged IDs.
+      if (parts[0] === 'drain') await this.putQueue([]);
+      const events = queue.map((item) => {
+        try {
+          return JSON.parse(item.out);
+        } catch {
+          return null;
+        }
+      }).filter(Boolean);
+      return Response.json({ events });
+    }
+
     return new Response('Not found', { status: 404 });
   }
 
@@ -535,23 +684,27 @@ export class RelayPairing extends DurableObject {
       // anything else (first connect, stale token, legacy client) gets a fresh
       // one. Code-only auth stays the bootstrap path; ongoing relays ride on
       // the high-entropy token (max MAX_DEVICE_TOKENS kept per pairing).
-      const tokens = await this.getTokens();
-      let issued;
-      if (typeof msg.device_token === 'string' && tokens.includes(msg.device_token)) {
-        issued = msg.device_token;
-      } else {
-        issued = randomDeviceToken();
-        tokens.push(issued);
-        if (tokens.length > MAX_DEVICE_TOKENS) tokens.splice(0, tokens.length - MAX_DEVICE_TOKENS);
-        await this.putTokens(tokens);
+      const issued = await this.issueDeviceToken(msg.device_token);
+      ws.send(JSON.stringify({ type: 'auth_ok', device_token: issued }));
+      if (role === 'receiver') {
+        // An explicitly FCM-mode receiver may open a temporary call socket.
+        // Keep its durable backlog for authenticated fetch/ack, not WS replay.
+        const mode = msg.delivery_mode === 'fcm' ? 'fcm' : 'ws';
+        await this.setDeliveryMode('receiver', mode);
+        // Catch-up: events the sender uplinked while this receiver was
+        // offline arrive now, in order, before any live relay.
+        if (mode === 'ws') await this.flushQueue(ws);
       }
-        ws.send(JSON.stringify({ type: 'auth_ok', device_token: issued }));
-        if (role === 'receiver') {
-          // Catch-up: events the sender uplinked while this receiver was
-          // offline arrive now, in order, before any live relay.
-          await this.flushQueue(ws);
-        }
-        return; // authenticated: never relayed
+      return; // authenticated: never relayed
+    }
+
+    // ArrayBuffer frames are live call PCM. They are intentionally sent only
+    // to an online peer and never touch Durable Object storage or FCM.
+    if (message instanceof ArrayBuffer || ArrayBuffer.isView(message)) {
+      const sockets = this.liveSockets();
+      const target = role === 'sender' ? sockets.receiver : sockets.sender;
+      if (target && target.readyState === WebSocket.OPEN) target.send(message);
+      return;
     }
 
     if (!msg || msg.type === 'auth') return; // duplicate auth from an authenticated socket is ignored
@@ -563,21 +716,33 @@ export class RelayPairing extends DurableObject {
       return;
     }
 
+    const useFcmQueue = role === 'sender' && FCM_DURABLE_TYPES.has(msg.type) &&
+      (await this.getDeliveryModes()).receiver === 'fcm';
     const sockets = this.liveSockets();
     const target = role === 'sender' ? sockets.receiver : sockets.sender;
-    const out = JSON.stringify({ type: msg.type || 'unknown', from: role, data: msg.data });
-    if (target && target.readyState === WebSocket.OPEN) {
+    const eventId = randomToken();
+    const out = JSON.stringify({
+      type: msg.type || 'unknown',
+      from: role,
+      event_id: eventId,
+      data: msg.data,
+    });
+    if (target && target.readyState === WebSocket.OPEN && !useFcmQueue) {
       target.send(out);
       return;
     }
-    if (role === 'sender') {
+    if (role === 'sender' && msg.type !== 'call_control') {
       // Receiver offline: hold the event for catch-up and wake the phone
       // (the WS path used to drop it silently).
       const queue = await this.getQueue();
-      queue.push({ ts: Date.now(), out });
+      queue.push({ ts: Date.now(), event_id: eventId, out });
       while (queue.length > MAX_QUEUED) queue.shift();
       await this.putQueue(queue);
-      await this.wakeWithTimeout({ type: msg.type || 'unknown', data: msg.data ?? null });
+      await this.wakeWithTimeout({
+        type: msg.type || 'unknown',
+        event_id: eventId,
+        data: msg.data ?? null,
+      });
     }
   }
 
@@ -678,13 +843,36 @@ export default {
       return forwardSend(env, request, headerCode);
     }
 
+    if (
+      request.method === 'POST' &&
+      parts.length === 1 &&
+      ['fcm-register', 'drain', 'fetch', 'ack'].includes(parts[0])
+    ) {
+      if (!isValidCode(headerCode)) {
+        return Response.json({ error: 'missing pairing code' }, { status: 400 });
+      }
+      return forwardReceiverHttp(env, request, headerCode, parts[0]);
+    }
+
+    if (
+      request.method === 'POST' &&
+      parts.length === 2 &&
+      ['fcm-register', 'drain', 'fetch', 'ack'].includes(parts[0])
+    ) {
+      const code = isValidCode(headerCode) ? headerCode : parts[1];
+      if (!isValidCode(code)) return new Response('Not found', { status: 404 });
+      return forwardReceiverHttp(env, request, code, parts[0]);
+    }
+
     if (parts.length === 3 && parts[0] === 'pair' && parts[2] === 'status') {
       const code = parts[1];
       if (!CODE_RE.test(code)) {
         return Response.json({ exists: false });
       }
       const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
-      return Response.json(await inst.getStatus());
+      const forwarded = new URL(request.url);
+      forwarded.pathname = `/status/${code}`;
+      return inst.fetch(new Request(forwarded, request));
     }
 
     return new Response('Not found', { status: 404 });

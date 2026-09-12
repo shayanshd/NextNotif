@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -59,6 +60,9 @@ dependencies {
     // InvalidFragmentVersionForActivityResult in activity 1.9.1).
     implementation("androidx.fragment:fragment:1.8.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.3")
+    // 2.9.x remains compatible with this project's Kotlin 1.9 / compileSdk 34
+    // toolchain while providing unique coroutine work for FCM queue cleanup.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.activity:activity-compose:1.9.1")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
@@ -70,9 +74,15 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Pinned native WebRTC core; no Stream account/service dependency. Live
+    // media migration is separate from FCM wake/HTTPS message delivery.
+    implementation("io.getstream:stream-video-webrtc-android:145.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.google.firebase:firebase-auth-ktx:23.1.0")
     implementation("com.google.firebase:firebase-database-ktx:21.0.0")
+    // Last pre-Kotlin-2 Firebase Messaging line; upgrading further requires a
+    // coordinated Kotlin/Compose/AGP migration rather than a transport change.
+    implementation("com.google.firebase:firebase-messaging:24.1.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

@@ -6,8 +6,10 @@ server/pairings.json
 server/.pairings-*.tmp
 server/fcm-service-account.json
 server/fcm-test-sa.json
+server/secure-pairings.sqlite*
 
 # Android / Gradle
+android/app/google-services.json
 android/.gradle/
 android/build/
 android/app/build/
@@ -15,6 +17,8 @@ android/local.properties
 android/.idea/
 *.apk
 *.aab
+root-assets/
+device-backups/
 
 # Cloudflare Workers
 server-workers/.wrangler/

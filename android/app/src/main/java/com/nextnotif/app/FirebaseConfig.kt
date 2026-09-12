@@ -4,6 +4,7 @@ data class FirebaseCfg(
     val apiKey: String,
     val databaseUrl: String,
     val appId: String,
+    val messagingSenderId: String? = null,
 ) {
     val projectId: String
         get() = databaseUrl.substringAfter("https://").substringBefore(".").substringBefore("/")
@@ -24,9 +25,13 @@ object FirebaseConfig {
      */
     val DEFAULT: FirebaseCfg =
         FirebaseCfg(
-            apiKey = "AIzaSyDgxLTBpcI8-6QSYff9qFr5Z7ZYdFL4hxw",
+            // Android-specific key generated for com.nextnotif.app. The old
+            // Web key works for Auth/RTDB but Firebase Installations rejects
+            // it when the Android SDK includes package/certificate headers.
+            apiKey = "AIzaSyC15xJn01Yn8h6F7UcsYnJ54Qe4J0pStLY",
             databaseUrl = "https://nextnotif-5bcf9-default-rtdb.europe-west1.firebasedatabase.app",
-            appId = "1:223835571995:web:8b18ffe55c1b4e80fff5be",
+            appId = "1:223835571995:android:e18d5607a74d20ddfff5be",
+            messagingSenderId = "223835571995",
         )
 
     fun parse(raw: String): FirebaseCfg? {
@@ -42,7 +47,8 @@ object FirebaseConfig {
         if (!databaseUrl.startsWith("https://")) return null
         // firebase-common 21+ hard-requires an applicationId at build time.
         val appId = quotedValue(cleaned, "appId") ?: return null
-        return FirebaseCfg(apiKey, databaseUrl, appId)
+        val messagingSenderId = quotedValue(cleaned, "messagingSenderId")
+        return FirebaseCfg(apiKey, databaseUrl, appId, messagingSenderId)
     }
 
     // Matches `key: "value"` (console snippet) and `"key": "value"` (JSON).

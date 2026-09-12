@@ -32,11 +32,45 @@ Endpoints:
   the event is then held in a per-pairing queue (max 50, oldest dropped) and replayed
   in order the next time a receiver authenticates. `404` unknown pairing, `400` bad body.
 
-The Android app's **sender** role uses this uplink: it keeps no persistent socket,
-POSTs each SMS/call event the moment it happens, and queues events locally
-(SharedPreferences outbox) while the network is down. The **receiver** role still
-holds the long-lived websocket so it is notified instantly and picks up anything
-missed on (re)connect.
+For WebSocket pairings, both Android roles keep a full-duplex connection. Normal
+SMS/call events still fall back to `POST /send` and the local SharedPreferences
+outbox when needed. Binary WebSocket frames are reserved for live G.711 call audio and are
+never queued, persisted, or sent through FCM.
+
+## Optional live call relay (rooted gateway beta)
+
+Live calling is disabled by default and enabled separately on each **Sender** pairing.
+Ordinary SMS and incoming-call notifications do not require root and continue to work
+when this option is off or unsupported. When enabled, the sender verifies both root
+access and the gateway mixer helper before advertising the capability. Only then does
+an incoming-call notification on the receiver offer **Answer here**; otherwise it is a
+normal informational call alert with no remote-call controls.
+
+The sender opens a temporary authenticated WebSocket while the phone rings;
+the receiver joins it only after the user answers, then the phones exchange 8 kHz
+G.711 mu-law audio in 20 ms binary frames. The gateway captures the
+cellular downlink with `VOICE_DOWNLINK`; receiver audio is played into the rooted
+Samsung A5 mixer uplink. **Hang up** and call/disconnect cleanup stop both audio
+pipelines, restore `AudioMixer CH2 DOUT Select` to `AIF4IN`, close the temporary
+sockets, and return event delivery to FCM.
+
+Requirements and current limits:
+
+- The gateway is the tested rooted Samsung SM-A520F (Android 8), installed as a
+  Magisk privileged app with `CAPTURE_AUDIO_OUTPUT` and the supplied persistent
+  audio-device SELinux rule/mixer helper.
+- The receiver is a normal Android phone with microphone permission.
+- The sender needs Android's answer-call permission for remote Answer/Hang up. These
+  live-call permissions are optional and do not block the core relay.
+- FCM carries event delivery and the call wake-up. Temporary TLS WebSockets carry
+  live signaling/audio; no receiver WebSocket remains open between calls.
+- PCM is protected in transit by WSS, but it is not end-to-end encrypted from the
+  relay operator. Treat this as an experimental build and follow call-consent laws.
+
+Build the APK, then install/update the rooted gateway module with
+`tools/install-call-relay-module.sh`. The script expects the A520F `tinymix` binary
+at `root-assets/a520f-audio-tools/tinymix`; reboot after installation so Magisk can
+load the systemless APK and SELinux policy.
 
 The Android app creates/uses a code through this same flow. Pairings persist across server restarts in `server/pairings.json`.
 
@@ -124,14 +158,17 @@ Open `android/` in Android Studio (Giraffe or newer). Gradle sync, then Run. (Or
 
 `minSdk = 26` (Android 8.0 Oreo). Runs on Android 8 and newer; tested target = API 34.
 
-The default server URL is `ws://10.0.2.2:8000` (Android emulator alias for the host). For a real device, edit it in the app to `ws://<your-lan-ip>:8000`. Cleartext WS traffic is allowed in the manifest for development; switch to `wss://` for production.
+The default server URL is the production TLS relay,
+`wss://relay.amberdogeorgia.com`. Debug builds also allow a development LAN relay
+such as `ws://10.0.2.2:8000` (the Android-emulator alias for the host) or
+`ws://<your-lan-ip>:8000`. Release builds reject cleartext HTTP/WebSocket traffic.
 
 ## Features
 
 - **Many-to-many pairings** — a phone holds a *list* of pairings and can be **Sender** on some and **Receiver** on others at the same time. The home screen is a pairing hub: one card per pairing (optional human label, role, transport, this-phone + partner connection state), a per-pairing detail screen (code, settings, token status, per-pairing activity), and a full-screen add/edit flow.
 - **Pairing** — 6-digit code per pairing: "Generate code" asks the server for one, or both phones simply type the same code (auto-pair).
-- **Two transports** — the built-in Firebase relay (default, zero setup: same code + secret on both phones), bring-your-own Firebase project, or your own relay server over WebSocket.
-- **SMS + call forwarding** — incoming SMS (multi-part joined) and call states (RINGING/OFFHOOK/IDLE) on the sender phone are pushed instantly over WebSocket to the receiver phone.
+- **Three transports** — FCM on demand (recommended for idle efficiency), the built-in/bring-your-own Firebase relay, or an always-connected WebSocket relay.
+- **SMS + call forwarding** — incoming SMS (multi-part joined) and call states (RINGING/OFFHOOK/IDLE) on the sender phone use the configured transport, with FCM/HTTPS recommended for efficient idle delivery.
 - **Caller ID** — on Android 8–10 (API 26–30) the incoming call number is resolved to a contact name on the sender and shown in the receiver's notification. On Android 11+ (API 31+) the OS withholds the incoming number from third-party apps, so the call state still forwards but the number shows as "unknown".
 - **Live UI** — relay hero card with prominent Start/Stop, per-pairing cards with live "This phone" / "Partner" status pills (partner state polled from the server every 30 s), and a humanized global activity feed (icon + title + pairing chip + time per event).
 - **Reliability** — foreground service keeps the socket alive (exponential-backoff reconnect), events arriving while offline are queued (max 100) and replayed on reconnect, the service restarts after a reboot, and a one-tap "Battery: request exemption" whitelists the app from doze.
@@ -143,15 +180,20 @@ The default server URL is `ws://10.0.2.2:8000` (Android emulator alias for the h
 - Notification channels are eagerly created via `Notifications.ensureChannels` on API 26+.
 - `FOREGROUND_SERVICE_TYPE_*` is only set on API 29+; below that the type-less overload is used.
 - `POST_NOTIFICATIONS` is only requested on API 33+.
-- `usesCleartextTraffic="true"` is set so `ws://` works without an extra network-security-config.
+- Debug builds set `usesCleartextTraffic="true"` for local `ws://` development;
+  release builds keep cleartext disabled and use the TLS relay by default.
 
 ## Flow
 
 1. Install the app on **both** phones. Run the server (`python main.py`) on a host reachable by both devices (use the host's LAN IP on real devices, `10.0.2.2` on the emulator).
 2. On phone A: tap **Add pairing**, choose **Sender**, tap **Generate code** — the server allocates a 6-digit code and stores it on the phone.
 3. On phone B: tap **Add pairing**, choose **Receiver**, enter the same 6-digit code, add it.
-4. Tap **Start relay** on each phone.
-5. Phone A receives an SMS or incoming call → BroadcastReceiver fires → service forwards over WebSocket → server relays → phone B shows a notification.
+4. Tap **Start relay** on the sender. An FCM receiver shows **Ready** without keeping
+   a foreground service or WebSocket alive.
+5. Phone A receives an SMS or incoming call → the app posts it over HTTPS → the
+   relay wakes phone B through FCM → phone B shows a notification and stores it in
+   Messages. If the rooted reference-device beta was explicitly enabled and its
+   capability check passes, an answered call temporarily opens live sockets.
 
 Add more pairings any time (the same phone can be sender on one and receiver on another); each pairing has its own card, status, and activity on the home screen.
 
@@ -167,12 +209,13 @@ If you'd rather not use Generate code, both phones can type the same 6-digit num
 - `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` (optional whitelist)
 - `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`
 
-Note: on app start, the app immediately asks for **all** runtime permissions it declares —
-SMS, phone state, contacts, and notifications (Android 13+) — on a dedicated permissions
-screen, and stays locked there until every one is granted. Pairing and the relay can only
-be used after that. If a permission is permanently denied, the screen offers an "Open app
-settings" shortcut. (Battery-optimization exemption stays optional, requested from the
-home screen menu.)
+Runtime permissions are progressive and pairing-role aware. A fresh install can reach
+the pairing UI without granting anything. After an enabled pairing is added, a sender
+requires SMS receive/read plus phone-state access; a receiver requires notifications only
+on Android 13+. Contacts, remote answer, microphone/live audio, and battery exemption are
+optional capabilities and do not block the baseline SMS/call-information relay. If a
+required permission is permanently denied, the permission screen offers an **Open app
+settings** shortcut.
 
 On some OEM skins the app may additionally need to be set as the **default SMS app**
 for `SMS_RECEIVED` to be delivered. Not required on stock AOSP/Google images, and

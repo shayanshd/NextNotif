@@ -30,12 +30,14 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -46,6 +48,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +56,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
@@ -62,6 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -85,7 +90,11 @@ fun PairingDetailScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
     var showEntry by remember { mutableStateOf<AppState.Entry?>(null) }
+    var relayTestState by remember(pairing.code) { mutableStateOf<RelaySelfTest.Result?>(null) }
+    var relayTestRunning by remember(pairing.code) { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val cs = MaterialTheme.colorScheme
 
     LaunchedEffect(copied) {
@@ -200,13 +209,13 @@ fun PairingDetailScreen(
                                     stringResource(
                                         if (pairing.role == Role.SENDER) R.string.home_role_sender_short
                                         else R.string.home_role_receiver_short,
-                                    ) + " · " + if (pairing.isFirebase) {
-                                        stringResource(
+                                    ) + " · " + when {
+                                        pairing.isFirebase -> stringResource(
                                             if (pairing.fbConfig.isNullOrBlank()) R.string.home_transport_firebase
                                             else R.string.home_transport_firebase_own,
                                         )
-                                    } else {
-                                        serverHost(pairing.server)
+                                        pairing.isFcmOnDemand -> stringResource(R.string.home_transport_fcm)
+                                        else -> serverHost(pairing.server)
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -250,6 +259,94 @@ fun PairingDetailScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                         )
+                    }
+                }
+            }
+
+            if (pairing.role == Role.SENDER && pairing.isFcmOnDemand) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                stringResource(R.string.detail_relay_test_title),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                stringResource(R.string.detail_relay_test_body),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    relayTestRunning = true
+                                    relayTestState = null
+                                    scope.launch {
+                                        relayTestState = RelaySelfTest.send(context, pairing)
+                                        relayTestRunning = false
+                                    }
+                                },
+                                enabled = pairing.enabled && !relayTestRunning,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                if (relayTestRunning) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                Text(
+                                    stringResource(
+                                        if (relayTestRunning) R.string.detail_relay_test_sending
+                                        else R.string.detail_relay_test_action,
+                                    ),
+                                )
+                            }
+                            relayTestState?.let { result ->
+                                val success = result is RelaySelfTest.Result.Success
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Icon(
+                                        if (success) Icons.Default.Check else Icons.Default.Warning,
+                                        contentDescription = null,
+                                        tint = if (success) Color(0xFF16A34A) else MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Text(
+                                        when (result) {
+                                            is RelaySelfTest.Result.Success -> stringResource(
+                                                R.string.detail_relay_test_success,
+                                            )
+                                            is RelaySelfTest.Result.Failure -> stringResource(
+                                                R.string.detail_relay_test_failure,
+                                                result.message,
+                                            )
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (success) MaterialTheme.colorScheme.onSurface
+                                        else MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                            }
+                            if (!pairing.enabled) {
+                                Text(
+                                    stringResource(R.string.detail_relay_test_disabled),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -320,13 +417,13 @@ fun PairingDetailScreen(
                         )
                         DetailInfoRow(
                             label = stringResource(R.string.detail_connection),
-                            value = if (pairing.isFirebase) {
-                                stringResource(
+                            value = when {
+                                pairing.isFirebase -> stringResource(
                                     if (pairing.fbConfig.isNullOrBlank()) R.string.home_transport_firebase
                                     else R.string.home_transport_firebase_own
                                 )
-                            } else {
-                                stringResource(R.string.setup_transport_ws)
+                                pairing.isFcmOnDemand -> stringResource(R.string.home_transport_fcm)
+                                else -> stringResource(R.string.setup_transport_ws)
                             },
                             icon = Icons.Default.Info,
                         )

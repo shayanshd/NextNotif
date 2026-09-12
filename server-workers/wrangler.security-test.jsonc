@@ -1,0 +1,15 @@
+{
+  "name": "nextnotif-security-local-test",
+  "main": "security-test-worker.mjs",
+  "compatibility_date": "2026-09-12",
+  "durable_objects": {
+    "bindings": [
+      { "name": "SECURITY_TEST", "class_name": "SecurityStoreTest" },
+      { "name": "SECURITY_HTTP", "class_name": "SecurityHttpTest" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SecurityStoreTest"] },
+    { "tag": "v2", "new_sqlite_classes": ["SecurityHttpTest"] }
+  ]
+}

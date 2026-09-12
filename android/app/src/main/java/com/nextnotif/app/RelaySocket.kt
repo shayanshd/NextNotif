@@ -29,24 +29,43 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
 
+internal fun receiverDeliveryMode(role: Role, fcmOnDemand: Boolean): String? =
+    if (role == Role.RECEIVER && fcmOnDemand) "fcm" else null
+
 class RelaySocket(
     private val context: android.content.Context,
     private val server: String,
     private val role: Role,
     private val code: String,
     private val deviceToken: String? = null,
+    private var fcmToken: String? = null,
+    private val fcmOnDemand: Boolean = false,
     private val onEvent: (Event) -> Unit,
 ) {
+    companion object {
+        private const val TAG = "RelaySocket"
+        // At G.711's 8 KB/s this is about 500 ms. Once the TCP writer reaches
+        // this limit, dropping fresh media is preferable to growing call delay
+        // and starving WebSocket control frames/pings behind old audio.
+        private const val MAX_MEDIA_WRITE_QUEUE_BYTES = 4_096L
+    }
+
     sealed class Event {
         data object Open : Event()
         data class Closed(val reason: String) : Event()
         data class Failure(val error: String) : Event()
-        data class Incoming(val type: String, val data: JSONObject) : Event()
+        data class Incoming(val type: String, val data: JSONObject, val eventId: String? = null) : Event()
+        data class Binary(val bytes: ByteString) : Event()
+        /** Aggregate instrumentation signal only; no media bytes are retained. */
+        data object MediaDropped : Event()
         data class AuthOk(val deviceToken: String) : Event()
     }
 
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .pingInterval(5, TimeUnit.SECONDS)
+        // The receiver is the only role that holds a socket. Thirty seconds is
+        // frequent enough to survive common mobile NAT/proxy idle windows while
+        // cutting heartbeat radio wakeups by 6x versus the old 5-second value.
+        .pingInterval(30, TimeUnit.SECONDS)
         // A sinkhole stalls TLS; a real edge answers in well under 5 s, so a
         // short connect budget makes bad addresses fail over fast.
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -54,6 +73,7 @@ class RelaySocket(
         .build()
 
     private var ws: WebSocket? = null
+    @Volatile private var lastMediaDropLogAt = 0L
     @Volatile var isOpen: Boolean = false
         private set
     @Volatile var isAuthenticated: Boolean = false
@@ -74,6 +94,7 @@ class RelaySocket(
                     JSONObject().apply {
                         put("type", "hello")
                         put("device_name", deviceName())
+                        fcmToken?.let { put("fcm_token", it) }
                     }.toString(),
                 )
             }
@@ -88,7 +109,9 @@ class RelaySocket(
                             put("type", "auth")
                             put("token", token)
                             put("code", code)
+                            receiverDeliveryMode(role, fcmOnDemand)?.let { put("delivery_mode", it) }
                             deviceToken?.let { put("device_token", it) }
+                            fcmToken?.let { put("fcm_token", it) }
                         }
                         // Only report Open once we can actually send; the service
                         // flushes its outbox on Open and send() is gated on auth.
@@ -105,11 +128,13 @@ class RelaySocket(
                         return@runCatching
                     }
                     val data = obj.optJSONObject("data") ?: JSONObject()
-                    onEvent(Event.Incoming(type, data))
+                    onEvent(Event.Incoming(type, data, obj.optString("event_id").ifBlank { null }))
                 }
             }
 
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {}
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (isAuthenticated) onEvent(Event.Binary(bytes))
+            }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 isOpen = false
@@ -141,6 +166,38 @@ class RelaySocket(
         } catch (t: Throwable) {
             false
         }
+    }
+
+    /** Send an ephemeral media frame. The server never persists binary data. */
+    fun sendBinary(bytes: ByteArray): Boolean {
+        if (!isAuthenticated) return false
+        val socket = ws ?: return false
+        if (socket.queueSize() >= MAX_MEDIA_WRITE_QUEUE_BYTES) {
+            val now = System.currentTimeMillis()
+            if (now - lastMediaDropLogAt >= 1_000L) {
+                lastMediaDropLogAt = now
+                Log.w(TAG, "dropping live audio before TCP queue grows (${socket.queueSize()} bytes queued)")
+            }
+            onEvent(Event.MediaDropped)
+            return true
+        }
+        return try {
+            socket.send(ByteString.of(*bytes))
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /** Register a token obtained after the socket handshake completed. */
+    fun updateFcmToken(token: String) {
+        fcmToken = token
+        if (!isAuthenticated) return
+        ws?.send(
+            JSONObject().apply {
+                put("type", "fcm_token")
+                put("data", JSONObject().put("token", token))
+            }.toString(),
+        )
     }
 
     fun close() {

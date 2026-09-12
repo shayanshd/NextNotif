@@ -12,6 +12,7 @@ import os
 import socket
 import sys
 import threading
+import tempfile
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -84,7 +85,7 @@ def ws_connect(url, headers=None):
     return websockets.connect(url, **{_HDR_KWARG: headers})
 
 
-async def handshake(ws, code, token=None, device_token=None, device_name=None, fcm_token=None):
+async def handshake(ws, code, token=None, device_token=None, device_name=None, fcm_token=None, delivery_mode=None, device_id=None):
     """Send hello, recv the server handshake, answer auth, and consume auth_ok.
 
     Returns the device token issued (or kept) by the server.
@@ -101,8 +102,12 @@ async def handshake(ws, code, token=None, device_token=None, device_name=None, f
     auth = {"type": "auth", "token": token if token is not None else hs["token"], "code": code}
     if device_token is not None:
         auth["device_token"] = device_token
+    if device_id is not None:
+        auth["device_id"] = device_id
     if fcm_token is not None:
         auth["fcm_token"] = fcm_token
+    if delivery_mode is not None:
+        auth["delivery_mode"] = delivery_mode
     await ws.send(json.dumps(auth))
     raw = await asyncio.wait_for(ws.recv(), timeout=5)
     ok = json.loads(raw)
@@ -114,9 +119,9 @@ async def handshake(ws, code, token=None, device_token=None, device_name=None, f
     return ok["device_token"]
 
 
-async def authed_connect(h, path, code, device_token=None, device_name=None, fcm_token=None):
+async def authed_connect(h, path, code, device_token=None, device_name=None, fcm_token=None, delivery_mode=None, device_id=None):
     ws = await ws_connect(f"{h.ws_base}{path}")
-    dt = await handshake(ws, code, device_token=device_token, device_name=device_name, fcm_token=fcm_token)
+    dt = await handshake(ws, code, device_token=device_token, device_name=device_name, fcm_token=fcm_token, delivery_mode=delivery_mode, device_id=device_id)
     return ws, dt
 
 
@@ -240,6 +245,17 @@ async def check_reverse_relay(sender, receiver):
     got = json.loads(await asyncio.wait_for(sender.recv(), timeout=5))
     assert got["from"] == "receiver" and got["data"]["body"] == "ping", got
     print("[ok] reverse relay receiver -> sender")
+
+
+async def check_binary_audio_relay(sender, receiver):
+    """Ephemeral PCM frames relay byte-for-byte in both directions."""
+    downstream = b"\x00\x01\xfe\xff" * 80
+    upstream = b"\x10\x00\xf0\xff" * 80
+    await sender.send(downstream)
+    assert await asyncio.wait_for(receiver.recv(), timeout=5) == downstream
+    await receiver.send(upstream)
+    assert await asyncio.wait_for(sender.recv(), timeout=5) == upstream
+    print("[ok] binary call audio relayed bidirectionally")
 
 
 async def check_auth_duplicate_ignored(sender, receiver):
@@ -638,10 +654,8 @@ async def check_fcm_wake_offline(h, code, stub, public_key, fcm_token):
     assert msg["auth"] == "Bearer stub-access-token", msg["auth"]
     body = msg["body"]["message"]
     assert body["token"] == fcm_token, body
-    assert body["notification"]["body"] == "wake me up", body
-    assert "+15550001111" in body["notification"]["title"], body
-    assert body["data"]["nn"] == "1" and body["data"]["code"] == code and body["data"]["type"] == "sms", body
-    assert json.loads(body["data"]["data"])["body"] == "wake me up", body
+    assert "notification" not in body, body
+    assert body["data"] == {"nn": "1", "code": code, "wake": "1"}, body
     assert body["android"]["priority"] == "high", body
 
     # The OAuth assertion must be a valid RS256 JWT for the FCM scope, signed
@@ -678,6 +692,365 @@ async def check_fcm_rate_limit(h, code, stub):
         assert r.json() == {"delivered": False, "queued": 3}, r.text
     assert await poll(lambda: len(stub.messages) > before_msgs), "wake after cooldown did not fire"
     print("[ok] wake rate-limited per pairing, fires again after the cooldown")
+
+
+async def check_fcm_on_demand(h, stub, fcm_token):
+    """An FCM-only receiver creates its pairing over HTTPS, wakes for every
+    event, and drains the durable queue with its issued device token."""
+    code = str(100000 + time.time_ns() % 900000)
+    async with httpx.AsyncClient() as client:
+        initial = await client.get(f"{h.base}/pair/{code}/status")
+        assert initial.json()["exists"] is False, initial.text
+        r = await client.post(
+            f"{h.base}/fcm-register",
+            headers={"X-NextNotif-Code": code},
+            json={"fcm_token": fcm_token, "device_name": "Sleeping receiver"},
+        )
+        assert r.status_code == 200, r.text
+        device_token = r.json()["device_token"]
+        status = await client.get(f"{h.base}/pair/{code}/status")
+        assert status.json()["exists"] is True and status.json()["receiver_has_fcm"] is True
+        before = len(stub.messages)
+        for ts in (201, 202):
+            r = await client.post(
+                f"{h.base}/send/{code}",
+                json={"type": "sms", "data": {"from": "+15550001111", "body": f"push {ts}", "ts": ts}},
+            )
+            assert r.status_code == 200, r.text
+        assert await poll(lambda: len(stub.messages) >= before + 2), "on-demand wake was cooled down"
+        wakes = [m["body"]["message"]["data"] for m in stub.messages[-2:]]
+        assert all(w == {"nn": "1", "code": code, "wake": "1"} for w in wakes), wakes
+
+        denied = await client.post(f"{h.base}/drain/{code}")
+        assert denied.status_code == 401, denied.text
+        drained = await client.post(
+            f"{h.base}/drain",
+            headers={"X-NextNotif-Code": code, "X-NextNotif-Token": device_token},
+        )
+        assert drained.status_code == 200, drained.text
+        events = drained.json()["events"]
+        assert [e["data"]["body"] for e in events] == ["push 201", "push 202"], events
+        event_ids = [e["event_id"] for e in events]
+        assert all(event_ids) and len(set(event_ids)) == 2, event_ids
+        empty = await client.post(
+            f"{h.base}/drain/{code}", headers={"X-NextNotif-Token": device_token}
+        )
+        assert empty.status_code == 200 and empty.json()["events"] == [], empty.text
+    print("[ok] FCM on-demand: every event wakes, authenticated drain clears queue")
+
+
+async def check_secure_endpoint_guards(h):
+    import main
+    from unittest.mock import patch
+    from secure_pairing_store import SecurePairingStore
+    code = await fresh_code(h)
+    previous_store = main.registry.secure_store
+    with tempfile.TemporaryDirectory(prefix="nextnotif-secure-smoke-") as directory:
+        store = SecurePairingStore(os.path.join(directory, "secure.sqlite"))
+        owner, invite = store.create(code, "sender", 1000)
+        receiver = store.join(code, invite.secret, "receiver", 1001)
+        main.registry.secure_store = store
+        def headers(grant):
+            return {"X-NextNotif-Device-Id": grant.device_id,
+                    "X-NextNotif-Token": grant.device_token}
+        try:
+            async with httpx.AsyncClient() as client:
+                for path, payload, forbidden in (
+                    ("send", {"type": "sms", "data": {"body": "secure"}}, receiver),
+                    ("fcm-register", {"fcm_token": FCM_TOKEN}, owner),
+                    ("fetch", {}, owner), ("ack", {"event_ids": []}, owner), ("drain", {}, owner),
+                ):
+                    for presented in ({}, headers(forbidden),
+                                      {**headers(owner), "X-NextNotif-Token": "wrong"}):
+                        response = await client.post(f"{h.base}/{path}/{code}", headers=presented, json=payload)
+                        assert response.status_code == 401, (path, response.status_code, response.text)
+                denied = await client.get(f"{h.base}/pair/{code}/status")
+                assert denied.status_code == 401, denied.text
+                registered = await client.post(f"{h.base}/fcm-register/{code}", headers=headers(receiver),
+                                               json={"fcm_token": FCM_TOKEN, "device_token": "do-not-mint"})
+                assert registered.status_code == 200 and registered.json()["device_token"] == receiver.device_token
+                sent = await client.post(f"{h.base}/send/{code}", headers=headers(owner),
+                                         json={"type": "sms", "data": {"body": "secure backlog"}})
+                assert sent.status_code == 200, sent.text
+                fetched = await client.post(f"{h.base}/fetch/{code}", headers=headers(receiver))
+                assert fetched.status_code == 200 and len(fetched.json()["events"]) == 1, fetched.text
+                for grant in (owner, receiver):
+                    assert (await client.get(f"{h.base}/pair/{code}/status", headers=headers(grant))).status_code == 200
+                main.registry.save()
+                restored = main.Registry(main.PAIRINGS_FILE)
+                assert restored.get(code).security_mode == "invite_v1"
+                main.registry.secure_store = None
+                unavailable = await client.post(f"{h.base}/fetch/{code}", headers=headers(receiver))
+                assert unavailable.status_code == 401, unavailable.text
+                main.registry.secure_store = store
+            for grant in (None, owner):
+                pending = await ws_connect(f"{h.ws_base}/ws/receiver/{code}")
+                try:
+                    await pending.send(json.dumps({"type": "hello", "device_name": "intruder"}))
+                    challenge = json.loads(await pending.recv())
+                    auth = {"type": "auth", "token": challenge["token"], "code": code}
+                    if grant:
+                        auth.update(device_id=grant.device_id, device_token=grant.device_token)
+                    await pending.send(json.dumps(auth))
+                    await asyncio.wait_for(pending.wait_closed(), timeout=5)
+                    assert pending.close_code == 1008, pending.close_code
+                    assert current_pairing(code).receiver_name != "intruder"
+                finally:
+                    await pending.close()
+            authenticated, token = await authed_connect(h, f"/ws/receiver/{code}", code,
+                device_token=receiver.device_token, device_id=receiver.device_id, delivery_mode="fcm")
+            assert token == receiver.device_token and current_pairing(code).tokens == []
+            async with httpx.AsyncClient() as client:
+                for presented in ({}, headers(receiver)):
+                    denied = await client.post(f"{h.base}/pair/{code}/revoke", headers=presented,
+                                               json={"device_id": receiver.device_id})
+                    assert denied.status_code == 401, denied.text
+                    assert len(current_pairing(code).queue) == 1
+                self_removal = await client.post(f"{h.base}/pair/{code}/revoke", headers=headers(owner),
+                                                 json={"device_id": owner.device_id})
+                assert self_removal.status_code == 400, self_removal.text
+                with patch.object(main.registry, "save", side_effect=OSError("simulated disk failure")):
+                    revoked = await client.post(f"{h.base}/pair/{code}/revoke", headers=headers(owner),
+                                                 json={"device_id": receiver.device_id})
+                assert revoked.status_code == 503, revoked.text
+                rejected = await client.post(f"{h.base}/fetch/{code}", headers=headers(receiver))
+                assert rejected.status_code == 401, rejected.text
+                retried = await client.post(f"{h.base}/pair/{code}/revoke", headers=headers(owner),
+                                            json={"device_id": receiver.device_id})
+                assert retried.status_code == 200, retried.text
+            await asyncio.wait_for(authenticated.wait_closed(), timeout=5)
+            assert authenticated.close_code == 1008, authenticated.close_code
+            assert current_pairing(code).receiver is None
+            assert current_pairing(code).queue == [] and "receiver" not in current_pairing(code).fcm
+            assert main.Registry(main.PAIRINGS_FILE).get(code).queue == []
+        finally:
+            main.registry.secure_store = previous_store
+            main.registry.pairings.pop(code, None)
+            main.registry.save()
+    print("[ok] secure records enforce role credentials across HTTP/WS and never mint legacy fallback tokens")
+
+
+async def check_secure_pair_deletion(h):
+    import main
+    from unittest.mock import patch
+    from secure_pairing_store import SecurePairingStore
+    from secure_pairing import AuthorizationError
+    code = await fresh_code(h)
+    original_registry = main.registry
+    previous_store = original_registry.secure_store
+    sockets = []
+    with tempfile.TemporaryDirectory(prefix="nextnotif-delete-smoke-") as directory:
+        store = SecurePairingStore(os.path.join(directory, "secure.sqlite"))
+        owner, invite = store.create(code, "sender", 1000)
+        receiver = store.join(code, invite.secret, "receiver", 1001)
+        original_registry.secure_store = store
+        def headers(grant):
+            return {"X-NextNotif-Device-Id": grant.device_id, "X-NextNotif-Token": grant.device_token}
+        try:
+            sender_socket, _ = await authed_connect(h, f"/ws/sender/{code}", code,
+                device_id=owner.device_id, device_token=owner.device_token)
+            receiver_socket, _ = await authed_connect(h, f"/ws/receiver/{code}", code,
+                device_id=receiver.device_id, device_token=receiver.device_token, delivery_mode="fcm")
+            sockets = [sender_socket, receiver_socket]
+            async with httpx.AsyncClient() as client:
+                await client.post(f"{h.base}/fcm-register/{code}", headers=headers(receiver), json={"fcm_token": FCM_TOKEN})
+                await client.post(f"{h.base}/send/{code}", headers=headers(owner),
+                                  json={"type": "sms", "data": {"body": "delete this backlog"}})
+                assert len(current_pairing(code).queue) == 1
+                for presented in ({}, headers(receiver)):
+                    denied = await client.delete(f"{h.base}/pair/{code}", headers=presented)
+                    assert denied.status_code == 401, denied.text
+                with patch.object(original_registry, "save", side_effect=OSError("reservation write failed")):
+                    failed = await client.delete(f"{h.base}/pair/{code}", headers=headers(owner))
+                    assert failed.status_code == 503, failed.text
+                assert len(current_pairing(code).queue) == 1 and code not in original_registry.blocked_records
+                with patch.object(store, "purge_reserved", side_effect=OSError("credential cleanup failed")):
+                    pending = await client.delete(f"{h.base}/pair/{code}", headers=headers(owner))
+                    assert pending.status_code == 503, pending.text
+                for socket in sockets:
+                    await asyncio.wait_for(socket.wait_closed(), timeout=5)
+                    assert socket.close_code == 1008, socket.close_code
+                assert original_registry.get_or_create(code) is None
+                assert original_registry.get(code) is None
+                restored = main.Registry(main.PAIRINGS_FILE)
+                restored.secure_store = store
+                assert restored.get_or_create(code) is None
+                assert restored.blocked_records[code]["cleanup_pending"] is True
+                with patch.object(main, "registry", restored):
+                    completed = await client.delete(f"{h.base}/pair/{code}", headers=headers(owner))
+                    assert completed.status_code == 200, completed.text
+                    repeat = await client.delete(f"{h.base}/pair/{code}", headers=headers(owner))
+                    assert repeat.status_code == 200, repeat.text
+                    forbidden = await client.delete(f"{h.base}/pair/{code}", headers=headers(receiver))
+                    assert forbidden.status_code == 401, forbidden.text
+                    registration = await client.post(f"{h.base}/fcm-register/{code}", json={"fcm_token": FCM_TOKEN})
+                    assert registration.status_code == 401, registration.text
+                assert not store.exists(code)
+                credential_rejected = False
+                try:
+                    store.authorize(code, owner.device_id, owner.device_token, "sender")
+                except AuthorizationError:
+                    credential_rejected = True
+                assert credential_rejected, "deleted credential still valid"
+                persisted = main.Registry(main.PAIRINGS_FILE)
+                assert persisted.get_or_create(code) is None
+                assert persisted.blocked_records[code]["cleanup_pending"] is False
+        finally:
+            for socket in sockets:
+                await socket.close()
+            original_registry.secure_store = previous_store
+            original_registry.blocked_records.pop(code, None)
+            original_registry.pairings.pop(code, None)
+            original_registry.save()
+    print("[ok] owner-only pair deletion closes both peers, purges credentials/data, and retries safely after restart")
+
+
+async def check_pending_peer_isolation(h):
+    code = await fresh_code(h)
+    sender, _ = await authed_connect(h, f"/ws/sender/{code}", code)
+    pending = await websockets.connect(f"{h.ws_base}/ws/receiver/{code}")
+    try:
+        await pending.send(json.dumps({"type": "hello", "device_name": "unauthenticated",
+                                       "fcm_token": FCM_TOKEN}))
+        handshake = json.loads(await asyncio.wait_for(pending.recv(), timeout=5))
+        assert handshake["type"] == "handshake", handshake
+        async with httpx.AsyncClient() as client:
+            status = (await client.get(f"{h.base}/pair/{code}/status")).json()
+            assert not status["receiver_connected"] and status["receiver_name"] is None, status
+            assert not status["receiver_has_fcm"], status
+            sent = await client.post(f"{h.base}/send/{code}",
+                                     json={"type": "sms", "data": {"body": "protected backlog"}})
+            assert sent.json() == {"delivered": False, "queued": 1}, sent.text
+        await pending.send(json.dumps({"type": "auth", "token": "wrong", "code": code}))
+        await asyncio.wait_for(pending.wait_closed(), timeout=5)
+        assert pending.close_code == 1008, pending.close_code
+        assert current_pairing(code).receiver is None
+        assert len(current_pairing(code).queue) == 1
+        receiver, _ = await authed_connect(h, f"/ws/receiver/{code}", code)
+        try:
+            event = json.loads(await asyncio.wait_for(receiver.recv(), timeout=5))
+            assert event["data"]["body"] == "protected backlog", event
+        finally:
+            await receiver.close()
+    finally:
+        await pending.close()
+        await sender.close()
+    print("[ok] pending socket cannot receive backlog, publish metadata, or impersonate a connected peer")
+
+
+async def check_queue_fetch_ack(h):
+    """A lost fetch/ACK response cannot lose events or remove newer arrivals."""
+    code = await fresh_code(h)
+    async with httpx.AsyncClient() as client:
+        registered = await client.post(
+            f"{h.base}/fcm-register/{code}", json={"fcm_token": FCM_TOKEN}
+        )
+        assert registered.status_code == 200, registered.text
+        token = registered.json()["device_token"]
+        headers = {"X-NextNotif-Code": code, "X-NextNotif-Token": token}
+        for ts in (301, 302):
+            sent = await client.post(
+                f"{h.base}/send/{code}",
+                json={"type": "sms", "data": {"body": f"durable {ts}", "ts": ts}},
+            )
+            assert sent.status_code == 200, sent.text
+        denied_fetch = await client.post(f"{h.base}/fetch/{code}")
+        assert denied_fetch.status_code == 401, denied_fetch.text
+        first = await client.post(f"{h.base}/fetch", headers=headers)
+        assert first.status_code == 200, first.text
+        events = first.json()["events"]
+        assert [event["data"]["ts"] for event in events] == [301, 302], events
+        repeated = await client.post(
+            f"{h.base}/fetch/{code}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert repeated.status_code == 200 and repeated.json()["events"] == events, repeated.text
+        event_ids = [event["event_id"] for event in events]
+        denied_ack = await client.post(
+            f"{h.base}/ack/{code}",
+            headers={"X-NextNotif-Token": "wrong-token"}, json={"event_ids": event_ids},
+        )
+        assert denied_ack.status_code == 401, denied_ack.text
+        for invalid in (None, "not-a-list", [" "], [123], ["id"] * 101):
+            response = await client.post(
+                f"{h.base}/ack", headers=headers, json={"event_ids": invalid}
+            )
+            assert response.status_code == 400, response.text
+        unchanged = await client.post(f"{h.base}/fetch", headers=headers)
+        assert unchanged.json()["events"] == events, unchanged.text
+        # A new event arriving after the snapshot must survive ACK of the old IDs.
+        sent = await client.post(
+            f"{h.base}/send/{code}", json={"type": "sms", "data": {"body": "newer", "ts": 303}}
+        )
+        assert sent.status_code == 200, sent.text
+        ack = await client.post(f"{h.base}/ack", headers=headers, json={"event_ids": event_ids})
+        assert ack.status_code == 200 and ack.json() == {"acknowledged": 2}, ack.text
+        retry = await client.post(
+            f"{h.base}/ack/{code}", headers={"Authorization": f"Bearer {token}"},
+            json={"event_ids": event_ids},
+        )
+        assert retry.status_code == 200 and retry.json() == {"acknowledged": 0}, retry.text
+        remaining = await client.post(f"{h.base}/fetch", headers=headers)
+        newer = remaining.json()["events"]
+        assert len(newer) == 1 and newer[0]["data"]["ts"] == 303, newer
+        final_ack = await client.post(
+            f"{h.base}/ack", headers=headers, json={"event_ids": [newer[0]["event_id"]]}
+        )
+        assert final_ack.json() == {"acknowledged": 1}, final_ack.text
+        empty = await client.post(f"{h.base}/fetch", headers=headers)
+        assert empty.json() == {"events": []}, empty.text
+    print("[ok] queue fetch/ACK: repeatable snapshot, authenticated bounded ACK, newer events retained")
+
+
+async def check_fcm_temporary_socket(h, stub):
+    """A call-only receiver socket preserves durable FCM inbox delivery."""
+    code = await fresh_code(h)
+    async with httpx.AsyncClient() as client:
+        registered = await client.post(
+            f"{h.base}/fcm-register/{code}", json={"fcm_token": FCM_TOKEN}
+        )
+        assert registered.status_code == 200, registered.text
+        token = registered.json()["device_token"]
+        headers = {"X-NextNotif-Token": token}
+        queued = await client.post(
+            f"{h.base}/send/{code}", json={"type": "sms", "data": {"body": "backlog"}}
+        )
+        assert queued.json()["queued"] == 1, queued.text
+        sender, _ = await authed_connect(h, f"/ws/sender/{code}", code)
+        receiver, _ = await authed_connect(
+            h, f"/ws/receiver/{code}", code, device_token=token, delivery_mode="fcm"
+        )
+        try:
+            assert current_pairing(code).delivery["receiver"] == "fcm"
+            before = len(stub.messages)
+            sent = await client.post(
+                f"{h.base}/send/{code}", json={"type": "sms", "data": {"body": "during call"}}
+            )
+            assert sent.json() == {"delivered": False, "queued": 2}, sent.text
+            for event_type in ("call", "relay_test"):
+                await sender.send(json.dumps({"type": event_type, "data": {"state": "RINGING"}}))
+            assert await poll(lambda: len(current_pairing(code).queue) == 4)
+            assert await poll(lambda: len(stub.messages) >= before + 3), "durable events did not wake FCM"
+            snapshot = await client.post(f"{h.base}/fetch/{code}", headers=headers)
+            events = snapshot.json()["events"]
+            assert [event["type"] for event in events] == ["sms", "sms", "call", "relay_test"], events
+            assert events[0]["data"]["body"] == "backlog", events
+            # First socket delivery must be control, not destructive backlog replay.
+            await sender.send(json.dumps({"type": "call_control", "data": {"action": "connected"}}))
+            downstream = json.loads(await asyncio.wait_for(receiver.recv(), timeout=5))
+            assert downstream["type"] == "call_control", downstream
+            await receiver.send(json.dumps({"type": "call_control", "data": {"action": "answer"}}))
+            upstream = json.loads(await asyncio.wait_for(sender.recv(), timeout=5))
+            assert upstream["type"] == "call_control", upstream
+            await sender.send(b"downlink")
+            assert await asyncio.wait_for(receiver.recv(), timeout=5) == b"downlink"
+            await receiver.send(b"uplink")
+            assert await asyncio.wait_for(sender.recv(), timeout=5) == b"uplink"
+            retained = await client.post(f"{h.base}/fetch/{code}", headers=headers)
+            assert retained.json()["events"] == events, retained.text
+        finally:
+            await receiver.close()
+            await sender.close()
+    print("[ok] temporary FCM socket: backlog retained, durable events queue+wake, controls/audio route live")
 
 
 async def check_fcm_live_no_wake(h, code, stub, fcm_token):
@@ -838,6 +1211,7 @@ async def main() -> int:
                     ("sms relay", check_sms_relay),
                     ("call relay", check_call_relay),
                     ("reverse relay", check_reverse_relay),
+                    ("binary audio relay", check_binary_audio_relay),
                     ("duplicate auth ignored", check_auth_duplicate_ignored),
                 ):
                     ok, _ = await run_check(name, fn, sender, receiver)
@@ -866,6 +1240,12 @@ async def main() -> int:
 
         ok, _ = await run_check("auth timeout", check_auth_timeout, server1)
         failures += 0 if ok else 1
+        ok_pending, _ = await run_check("pending peer isolation", check_pending_peer_isolation, server1)
+        failures += 0 if ok_pending else 1
+        ok_secure, _ = await run_check("secure endpoint guards", check_secure_endpoint_guards, server1)
+        failures += 0 if ok_secure else 1
+        ok_delete, _ = await run_check("secure pair deletion", check_secure_pair_deletion, server1)
+        failures += 0 if ok_delete else 1
 
         ok, _ = await run_check("header code", check_header_code, server1)
         failures += 0 if ok else 1
@@ -895,6 +1275,12 @@ async def main() -> int:
             )
             failures += 0 if ok else 1
         ok, _ = await run_check("fcm ws path", check_fcm_ws_path, server1, FCM_TOKEN)
+        failures += 0 if ok else 1
+        ok, _ = await run_check("fcm on demand", check_fcm_on_demand, server1, FCM_STUB, FCM_TOKEN)
+        failures += 0 if ok else 1
+        ok, _ = await run_check("queue fetch ack", check_queue_fetch_ack, server1)
+        failures += 0 if ok else 1
+        ok, _ = await run_check("fcm temporary socket", check_fcm_temporary_socket, server1, FCM_STUB)
         failures += 0 if ok else 1
         ok, _ = await run_check("fcm no config", check_fcm_no_config, server1)
         failures += 0 if ok else 1

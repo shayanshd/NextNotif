@@ -7,14 +7,14 @@ module sends a high-priority FCM message to the receiver's registered token
 so the OS wakes the phone and the relay service re-establishes its socket;
 the queued events are replayed on connect.
 
-The message carries both:
-
-- a ``notification`` (title/body) — shown by the *system* when the app process
-  is dead, which is then the only record of the event on that phone;
-- a ``data`` payload (``nn=1`` marker, pairing code, event type + data) —
-  handled by the app when the process is still alive; it posts its own
-  branded notification and re-arms the relay (deduped against the queue
-  replay by type + number + ts).
+The message is data-only and wake-only: it contains no SMS body, caller identity,
+event type, or event identifier. Android fetches the queued event afterward over
+authenticated HTTPS. Android routes mixed ``notification`` + ``data``
+messages to the system tray while the app is backgrounded, bypassing
+``FirebaseMessagingService.onMessageReceived`` until the user taps them. A
+high-priority data message invokes the service immediately so it can re-arm
+the relay; the queued event is then replayed and shown by the app's existing
+notification path.
 
 Configuration: a Firebase service account, either at the path named by the
 ``NEXTNOTIF_FCM_SERVICE_ACCOUNT`` env var or, by default,
@@ -148,49 +148,28 @@ def access_token(sa: dict, token_url: str) -> str:
     return token
 
 
-def notification_for(event_type: str, event_data: dict) -> tuple[str, str]:
-    """Title/body for the system-shown notification (app process dead)."""
-    data = event_data if isinstance(event_data, dict) else {}
-    if event_type == "sms":
-        number = str(data.get("from") or "unknown")
-        name = str(data.get("name") or "")
-        label = f"{name} ({number})" if name else number
-        return f"NextNotif: Text from {label}", str(data.get("body") or "")[:200]
-    if event_type == "call":
-        number = str(data.get("number") or "unknown")
-        name = str(data.get("name") or "")
-        label = f"{name} ({number})" if name else number
-        state = str(data.get("state") or "")
-        title = {
-            "RINGING": f"NextNotif: Incoming call from {label}",
-            "OFFHOOK": f"NextNotif: Call from {label} connected",
-            "IDLE": f"NextNotif: Call from {label} ended",
-        }.get(state, f"NextNotif: Call {state} from {label}".replace("  ", " ").strip())
-        return title, number
-    return f"NextNotif: {event_type}", ""
-
-
-def send(event_type: str, event_data, fcm_token: str, code: str, fcm_base: str) -> None:
+def send(
+    event_type: str,
+    event_data,
+    fcm_token: str,
+    code: str,
+    fcm_base: str,
+    event_id: str = "",
+) -> None:
     """Send one wake message. Raises on transport/API failure (caller logs)."""
     sa = service_account()
     if sa is None:
         raise RuntimeError("FCM not configured")
     token_url = os.environ.get("NEXTNOTIF_FCM_TOKEN_URL") or "https://oauth2.googleapis.com/token"
     bearer = access_token(sa, token_url)
-    title, body = notification_for(event_type, event_data if isinstance(event_data, dict) else {})
     message = {
         "token": fcm_token,
-        "notification": {"title": title, "body": body},
         "data": {
             "nn": "1",
             "code": code,
-            "type": str(event_type),
-            "data": json.dumps(event_data if isinstance(event_data, dict) else {}),
+            "wake": "1",
         },
-        "android": {
-            "priority": "high",
-            "defaultActivityName": "com.nextnotif.app.MainActivity",
-        },
+        "android": {"priority": "high"},
     }
     url = f"{fcm_base.rstrip('/')}/v1/projects/{sa['project_id']}/messages:send"
     req = urllib.request.Request(
@@ -206,7 +185,7 @@ def send(event_type: str, event_data, fcm_token: str, code: str, fcm_base: str) 
         raise RuntimeError(f"FCM API {e.code}: {detail}") from None
 
 
-def wake(pairing, role: str, event_type: str, event_data) -> None:
+def wake(pairing, role: str, event_type: str, event_data, event_id: str = "") -> None:
     """Best-effort wake for one pairing/role; never raises into the relay path.
 
     Rate-limited to one message per pairing+role per [WAKE_COOLDOWN_SECONDS]:
@@ -218,11 +197,12 @@ def wake(pairing, role: str, event_type: str, event_data) -> None:
         return
     now = time.time()
     last = getattr(pairing, "last_wake", {}).get(role, 0.0)
-    if now - last < WAKE_COOLDOWN_SECONDS:
+    on_demand = getattr(pairing, "delivery", {}).get(role) == "fcm"
+    if not on_demand and now - last < WAKE_COOLDOWN_SECONDS:
         return
     try:
         fcm_base = os.environ.get("NEXTNOTIF_FCM_BASE") or "https://fcm.googleapis.com"
-        send(event_type, event_data, token, pairing.code, fcm_base)
+        send(event_type, event_data, token, pairing.code, fcm_base, event_id)
     except Exception as e:
         _log(f"wake for {pairing.code}/{role} failed: {e}")
         return

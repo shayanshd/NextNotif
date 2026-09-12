@@ -79,6 +79,52 @@ class OutboxQueueTest {
     }
 
     @Test
+    fun peekDoesNotRemoveEventUntilAcknowledged() {
+        val prefs = FakeSharedPreferences()
+        OutboxQueue.enqueue(prefs, "111111", "sms", data(1))
+
+        val first = OutboxQueue.peek(prefs, "111111")!!
+        val retried = OutboxQueue.peek(prefs, "111111")!!
+
+        assertEquals(first.id, retried.id)
+        assertEquals(1, retried.data.getInt("i"))
+        assertTrue(OutboxQueue.acknowledge(prefs, "111111", first.id))
+        assertTrue(OutboxQueue.peek(prefs, "111111") == null)
+    }
+
+    @Test
+    fun acknowledgementRemovesOnlyMatchingEvent() {
+        val prefs = FakeSharedPreferences()
+        OutboxQueue.enqueue(prefs, "111111", "sms", data(1))
+        OutboxQueue.enqueue(prefs, "111111", "call", data(2))
+
+        val first = OutboxQueue.peek(prefs, "111111")!!
+        assertTrue(OutboxQueue.acknowledge(prefs, "111111", first.id))
+
+        val second = OutboxQueue.peek(prefs, "111111")!!
+        assertEquals("call", second.type)
+        assertEquals(2, second.data.getInt("i"))
+        assertTrue(!OutboxQueue.acknowledge(prefs, "111111", first.id))
+        assertEquals(second.id, OutboxQueue.peek(prefs, "111111")!!.id)
+    }
+
+    @Test
+    fun legacyEntryWithoutIdIsMigratedAndCanBeAcknowledged() {
+        val prefs = FakeSharedPreferences()
+        val legacy = org.json.JSONArray().put(
+            JSONObject().put("type", "sms").put("data", data(7)),
+        )
+        prefs.edit().putString("outbox_111111", legacy.toString()).apply()
+
+        val entry = OutboxQueue.peek(prefs, "111111")!!
+
+        assertEquals(7, entry.data.getInt("i"))
+        assertTrue(entry.id.isNotBlank())
+        assertTrue(OutboxQueue.acknowledge(prefs, "111111", entry.id))
+        assertTrue(OutboxQueue.peek(prefs, "111111") == null)
+    }
+
+    @Test
     fun queuesAreIsolatedPerPairing() {
         val prefs = FakeSharedPreferences()
         OutboxQueue.enqueue(prefs, "111111", "sms", data(1))

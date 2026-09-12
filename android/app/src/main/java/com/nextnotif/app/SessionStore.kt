@@ -16,6 +16,8 @@ data class SessionState(
     val fbConfig: String? = null,
     val secret: String? = null,
     val connected: Boolean = false,
+    /** User intent, persisted separately from the process-local connection state. */
+    val relayEnabled: Boolean = true,
     // Many-to-many source of truth: every pairing this phone participates in
     // (a phone may be sender in some and receiver in others). The
     // single-pairing fields above mirror the first entry for compatibility.
@@ -32,6 +34,7 @@ object SessionStore {
     private const val K_FB_CONFIG = "fb_config"
     private const val K_SECRET = "secret"
     private const val K_PAIRINGS = "pairings"
+    private const val K_RELAY_ENABLED = "relay_enabled"
 
     internal fun saveTo(prefs: SharedPreferences, state: SessionState) {
         prefs.edit().apply {
@@ -42,6 +45,7 @@ object SessionStore {
             state.transport?.let { putString(K_TRANSPORT, it) } ?: remove(K_TRANSPORT)
             state.fbConfig?.let { putString(K_FB_CONFIG, it) } ?: remove(K_FB_CONFIG)
             state.secret?.let { putString(K_SECRET, it) } ?: remove(K_SECRET)
+            putBoolean(K_RELAY_ENABLED, state.relayEnabled)
             val list = toPairingsJson(state.pairings)
             if (list.length() > 0) putString(K_PAIRINGS, list.toString()) else remove(K_PAIRINGS)
             apply()
@@ -79,6 +83,9 @@ object SessionStore {
             else -> emptyList()
         }
         val connected = prefs.getBoolean("connected", false)
+        // Existing installs always behaved as auto-on after boot, so defaulting
+        // to true preserves that intent during migration.
+        val relayEnabled = prefs.getBoolean(K_RELAY_ENABLED, true)
         return SessionState(
             role = role,
             code = code,
@@ -88,6 +95,7 @@ object SessionStore {
             fbConfig = fbConfig,
             secret = secret,
             connected = connected,
+            relayEnabled = relayEnabled,
             pairings = pairings,
         )
     }
@@ -105,6 +113,7 @@ object SessionStore {
                 p.deviceToken?.let { put("deviceToken", it) }
                 p.label?.let { put("label", it) }
                 put("enabled", p.enabled)
+                put("liveCallEnabled", p.liveCallEnabled)
             })
         }
         return arr
@@ -129,6 +138,7 @@ object SessionStore {
                     deviceToken = o.optString("deviceToken").ifBlank { null },
                     label = o.optString("label").ifBlank { null },
                     enabled = o.optBoolean("enabled", true),
+                    liveCallEnabled = o.optBoolean("liveCallEnabled", false),
                 )
             }.distinctBy { it.code }
         }.getOrNull() ?: emptyList()
@@ -159,5 +169,28 @@ object SessionStore {
 
     fun rememberGoodIp(ctx: Context, host: String, ip: String) {
         ctx.getSharedPreferences(P, Context.MODE_PRIVATE).edit().putString("good_ip_$host", ip).apply()
+    }
+
+    fun fcmToken(ctx: Context): String? =
+        ctx.getSharedPreferences(P, Context.MODE_PRIVATE).getString("fcm_token", null)
+
+    fun saveFcmToken(ctx: Context, token: String) {
+        ctx.getSharedPreferences(P, Context.MODE_PRIVATE).edit().putString("fcm_token", token).apply()
+    }
+
+    @Synchronized
+    fun updateDeviceToken(ctx: Context, code: String, token: String) {
+        val cur = load(ctx)
+        val index = cur.pairings.indexOfFirst { it.code == code }
+        if (index < 0) return
+        val updated = cur.pairings.toMutableList()
+        updated[index] = updated[index].copy(deviceToken = token)
+        save(
+            ctx,
+            cur.copy(
+                pairings = updated,
+                deviceToken = if (index == 0) token else cur.deviceToken,
+            ),
+        )
     }
 }

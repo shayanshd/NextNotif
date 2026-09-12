@@ -2,11 +2,13 @@ package com.nextnotif.app
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
@@ -14,7 +16,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
@@ -28,6 +29,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -36,6 +38,7 @@ import java.net.URL
 
 sealed interface AppScreen {
     data object Home : AppScreen
+    data object GatewayDiagnostics : AppScreen
     data class Detail(val code: String) : AppScreen
     data class AddEdit(val code: String?) : AppScreen
 }
@@ -51,19 +54,41 @@ class MainActivity : ComponentActivity() {
     private val notifPermMissing = mutableStateOf(false)
     private val permGateMissing = mutableStateOf<List<MissingPerm>>(emptyList())
     private val permAskAttempted = mutableStateOf(false)
+    private val liveCallPermMissing = mutableStateOf<List<String>>(emptyList())
+    private val showLiveCallPermissionPrompt = mutableStateOf(false)
+    private val liveCallPermAskAttempted = mutableStateOf(false)
+    private var requestingLiveCallPermissions = false
+    private val contactsPermissionGranted = mutableStateOf(false)
+    private val contactsPermissionAskAttempted = mutableStateOf(false)
+    private var requestingContactsPermission = false
 
     private val permLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        refreshPermGate()
+        val wasLiveCallRequest = requestingLiveCallPermissions
+        val wasContactsRequest = requestingContactsPermission
+        requestingLiveCallPermissions = false
+        requestingContactsPermission = false
+        refreshPermissionState()
+        startRelayIfPermissionsReady()
+        if (wasLiveCallRequest) {
+            liveCallPermAskAttempted.value = true
+            showLiveCallPermissionPrompt.value = liveCallPermMissing.value.isNotEmpty()
+        }
+        if (wasContactsRequest) {
+            contactsPermissionAskAttempted.value = true
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppState.initializeMessages(this)
         Notifications.ensureChannels(this)
-        refreshNotifPermMissing()
-        refreshPermGate()
+        // Token acquisition is independent of the relay service, which lets a
+        // normal app launch register FCM even before the user starts relaying.
+        FcmBridge.ensureToken(this)
         sessionState = mutableStateOf(SessionStore.load(this))
+        refreshPermissionState()
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -98,8 +123,7 @@ class MainActivity : ComponentActivity() {
                                 val s = AppState.conn.value
                                 if (
                                     s == AppState.ConnState.IDLE ||
-                                    s == AppState.ConnState.DISCONNECTED ||
-                                    s == AppState.ConnState.CONNECTING
+                                    s == AppState.ConnState.DISCONNECTED
                                 ) {
                                     handleAction(UiAction.StartService)
                                 } else {
@@ -108,14 +132,24 @@ class MainActivity : ComponentActivity() {
                             },
                             onBattery = { handleAction(UiAction.RequestBatteryExemption) },
                             onCallScreening = { handleAction(UiAction.OpenCallScreeningSettings) },
+                            onGatewayDiagnostics = {
+                                nav.value = nav.value + AppScreen.GatewayDiagnostics
+                            },
                             onReset = { showResetConfirm.value = true },
                             notifPermMissing = notifPermMissing.value,
                             onRequestNotifPerm = { requestNotifPerm() },
+                            liveCallPermMissing = liveCallPermMissing.value.isNotEmpty(),
+                            onFinishLiveCallSetup = {
+                                showLiveCallPermissionPrompt.value = true
+                            },
                             onAddPairing = { nav.value = nav.value + AppScreen.AddEdit(null) },
                             onOpenPairing = { p -> nav.value = nav.value + AppScreen.Detail(p.code) },
                             onEditPairing = { p -> nav.value = nav.value + AppScreen.AddEdit(p.code) },
                             onRemovePairing = { removeTarget.value = it },
                             onTogglePairing = { p -> handleAction(UiAction.SetPairingEnabled(p.code, !p.enabled)) },
+                        )
+                        AppScreen.GatewayDiagnostics -> GatewayDiagnosticsScreen(
+                            onBack = { nav.value = nav.value.dropLast(1) },
                         )
                         is AppScreen.Detail -> {
                             val p = session.pairings.firstOrNull { it.code == screen.code }
@@ -141,10 +175,24 @@ class MainActivity : ComponentActivity() {
                                 error = uiError.value,
                                 onBack = { nav.value = nav.value.dropLast(1) },
                                 onGenerateCode = { server, onResult -> generateCode(server, onResult) },
-                                onSubmit = { label, role, code, server, transport, fbConfig ->
+                                contactsPermissionGranted = contactsPermissionGranted.value,
+                                contactsPermissionDenied = contactsPermissionAskAttempted.value &&
+                                    !contactsPermissionGranted.value,
+                                contactsPermissionNeedsSettings = contactPermissionNeedsSettings(),
+                                onRequestContactsPermission = { requestContactsPermission() },
+                                onOpenAppSettings = { openAppSettings() },
+                                onSubmit = { label, role, code, server, transport, fbConfig, liveCallEnabled ->
                                     uiError.value = null
                                     handleAction(
-                                        UiAction.UpsertPairing(label, role, code, server, transport, fbConfig),
+                                        UiAction.UpsertPairing(
+                                            label,
+                                            role,
+                                            code,
+                                            server,
+                                            transport,
+                                            fbConfig,
+                                            liveCallEnabled,
+                                        ),
                                     )
                                 },
                             )
@@ -193,8 +241,138 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 }
+
+                if (showLiveCallPermissionPrompt.value && liveCallPermMissing.value.isNotEmpty()) {
+                    val useSettings = liveCallPermissionNeedsSettings()
+                    AlertDialog(
+                        onDismissRequest = { showLiveCallPermissionPrompt.value = false },
+                        title = {
+                            Text(
+                                stringResource(
+                                    if (liveCallPermAskAttempted.value) {
+                                        R.string.live_call_perm_denied_title
+                                    } else {
+                                        R.string.live_call_perm_title
+                                    },
+                                ),
+                            )
+                        },
+                        text = {
+                            Text(
+                                stringResource(
+                                    if (liveCallPermAskAttempted.value) {
+                                        R.string.live_call_perm_denied_body
+                                    } else {
+                                        R.string.live_call_perm_body
+                                    },
+                                ),
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    if (useSettings) {
+                                        showLiveCallPermissionPrompt.value = false
+                                        openAppSettings()
+                                    } else {
+                                        requestLiveCallPermissions()
+                                    }
+                                },
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (useSettings) R.string.perm_gate_settings
+                                        else R.string.live_call_perm_allow
+                                    ),
+                                )
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showLiveCallPermissionPrompt.value = false }) {
+                                Text(stringResource(R.string.live_call_perm_not_now))
+                            }
+                        },
+                    )
+                }
             }
         }
+
+        // Restore the user's last Start/Stop choice after process death or an
+        // app update. Receiver-only FCM pairings perform one short sync and do
+        // not leave a foreground service running.
+        startRelayIfPermissionsReady()
+
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+            intent.getBooleanExtra(EXTRA_RUN_GATEWAY_AUDIO_PROBE, false)
+        ) {
+            lifecycleScope.launch {
+                Log.i(AUDIO_PROBE_TAG, "probe_start")
+                val results = GatewayAudioProbe.run { source ->
+                    Log.i(AUDIO_PROBE_TAG, "probe_source=$source")
+                }
+                results.forEach { result ->
+                    val summary = result.summary
+                    Log.i(
+                        AUDIO_PROBE_TAG,
+                        "probe_result source=${result.source} status=${result.status}" +
+                            " dbfs=${summary?.dbfs} nonzero=${summary?.nonZeroPercent}" +
+                            " samples=${summary?.sampleCount} detail=${result.detail}",
+                    )
+                }
+                Log.i(AUDIO_PROBE_TAG, "probe_complete")
+            }
+        }
+
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+            intent.getBooleanExtra(EXTRA_RUN_CONTROLLED_CALL_PROBE, false)
+        ) {
+            lifecycleScope.launch {
+                Log.i(AUDIO_PROBE_TAG, "controlled_call_wait")
+                delay(2_000)
+                Log.i(AUDIO_PROBE_TAG, "controlled_call_start")
+                val result = GatewayAudioProbe.runControlledCall { }
+                result.timeline.forEach { slice ->
+                    Log.i(
+                        AUDIO_PROBE_TAG,
+                        "controlled_call_slice ms=${slice.startMs} dbfs=${slice.dbfs}",
+                    )
+                }
+                Log.i(
+                    AUDIO_PROBE_TAG,
+                    "controlled_call_result status=${result.status} dbfs=${result.summary?.dbfs}" +
+                        " nonzero=${result.summary?.nonZeroPercent} samples=${result.summary?.sampleCount}" +
+                        " detail=${result.detail}",
+                )
+                Log.i(AUDIO_PROBE_TAG, "controlled_call_complete")
+            }
+        }
+
+        if (
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0 &&
+            intent.getBooleanExtra(EXTRA_RUN_CALL_INJECTION_PROBE, false)
+        ) {
+            lifecycleScope.launch {
+                Log.i(AUDIO_PROBE_TAG, "injection_wait")
+                delay(2_000)
+                Log.i(AUDIO_PROBE_TAG, "injection_start")
+                val result = GatewayCallInjectionProbe.run(manageForwarding = false)
+                Log.i(
+                    AUDIO_PROBE_TAG,
+                    "injection_result success=${result.success} parameter=${result.parameterResult}" +
+                        " frames=${result.framesWritten} detail=${result.detail}",
+                )
+                Log.i(AUDIO_PROBE_TAG, "injection_complete")
+            }
+        }
+    }
+
+    companion object {
+        const val EXTRA_RUN_GATEWAY_AUDIO_PROBE = "run_gateway_audio_probe"
+        const val EXTRA_RUN_CONTROLLED_CALL_PROBE = "run_controlled_call_probe"
+        const val EXTRA_RUN_CALL_INJECTION_PROBE = "run_call_injection_probe"
+        const val AUDIO_PROBE_TAG = "NextNotifAudioProbe"
     }
 
     private fun refreshSession() {
@@ -208,13 +386,23 @@ class MainActivity : ComponentActivity() {
     private fun handleAction(action: UiAction) {
         when (action) {
             is UiAction.UpsertPairing -> upsertPairing(action)
-            is UiAction.StartService -> RelayForegroundService.Controller.start(this)
-            is UiAction.StopService -> RelayForegroundService.Controller.stop(this)
+            is UiAction.StartService -> {
+                val cur = SessionStore.load(this)
+                SessionStore.save(this, cur.copy(relayEnabled = true))
+                RelayForegroundService.Controller.start(this)
+            }
+            is UiAction.StopService -> {
+                val cur = SessionStore.load(this)
+                SessionStore.save(this, cur.copy(relayEnabled = false))
+                RelayForegroundService.Controller.stop(this)
+            }
             is UiAction.Reset -> {
                 SessionStore.clear(this)
+                AppState.clearMessages(this)
                 RelayForegroundService.Controller.stop(this)
                 AppState.clearStates()
                 refreshSession()
+                refreshPermissionState()
                 goHome()
             }
             is UiAction.RequestBatteryExemption -> BatteryGuard.requestIfNeeded(this)
@@ -243,9 +431,10 @@ class MainActivity : ComponentActivity() {
                     AppState.clearStates()
                 } else {
                     SessionStore.save(this, cur.copy(pairings = remaining))
-                    restartRelay(remaining)
+                    if (cur.relayEnabled) restartRelay(remaining)
                 }
                 refreshSession()
+                refreshPermissionState()
                 goHome()
             }
             is UiAction.SetPairingEnabled -> {
@@ -256,22 +445,29 @@ class MainActivity : ComponentActivity() {
                     },
                 )
                 SessionStore.save(this, updated)
-                if (action.enabled) {
+                if (action.enabled && cur.relayEnabled) {
                     RelayForegroundService.Controller.startPairing(this, action.code)
-                } else {
+                } else if (!action.enabled) {
                     RelayForegroundService.Controller.stopPairing(this, action.code)
+                } else {
+                    AppState.clearPairingState(action.code)
                 }
                 refreshSession()
+                refreshPermissionState()
             }
         }
     }
 
     private fun upsertPairing(a: UiAction.UpsertPairing) {
         val isFirebase = a.transport == FirebaseRelay.TRANSPORT
-        connecting.value = !isFirebase
+        val preferencesOnly = canSavePairingPreferencesOffline(
+            SessionStore.load(this).pairings.firstOrNull { it.code == a.code },
+            a.code, a.role, a.server, a.transport, a.fbConfig,
+        )
+        connecting.value = !isFirebase && !preferencesOnly
         uiError.value = null
         lifecycleScope.launch {
-            val status = if (isFirebase) {
+            val status = if (isFirebase || preferencesOnly) {
                 // Firebase transport has no server to pre-check; the relay
                 // verifies the config on connect (anonymous auth — no secret needed).
                 JSONObject()
@@ -292,19 +488,21 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             val cur = SessionStore.load(this@MainActivity)
-            // A device token belongs to the pairing it was issued for: it is
-            // kept only when re-saving the exact same code, otherwise the
-            // server issues a fresh one on first connect.
+            // Never forward a saved credential to another relay authority/role.
             val existing = cur.pairings.firstOrNull { it.code == a.code }
-            val newPairing = PairingInfo(
+            val newPairing = if (preferencesOnly && existing != null) existing.copy(
+                label = a.label,
+                liveCallEnabled = liveCallEnabledFor(a.role, a.liveCallEnabled),
+            ) else PairingInfo(
                 code = a.code,
                 role = a.role,
                 server = a.server,
                 transport = a.transport,
                 fbConfig = a.fbConfig,
-                deviceToken = existing?.deviceToken,
+                deviceToken = retainedDeviceToken(existing, a.code, a.role, a.server, a.transport, a.fbConfig),
                 label = a.label,
                 enabled = existing?.enabled ?: true,
+                liveCallEnabled = liveCallEnabledFor(a.role, a.liveCallEnabled),
             )
             val updated = if (existing != null) {
                 cur.copy(pairings = cur.pairings.map { if (it.code == a.code) newPairing else it })
@@ -312,22 +510,25 @@ class MainActivity : ComponentActivity() {
                 cur.copy(pairings = cur.pairings + newPairing)
             }
             SessionStore.save(this@MainActivity, updated)
-            restartRelay(updated.pairings)
             refreshSession()
+            refreshPermissionState()
+            if (updated.relayEnabled && permGateMissing.value.isEmpty()) {
+                restartRelay(updated.pairings)
+            }
             goHome()
+            if (newPairing.liveCallEnabled && liveCallPermMissing.value.isNotEmpty()) {
+                liveCallPermAskAttempted.value = false
+                showLiveCallPermissionPrompt.value = true
+            }
         }
     }
 
     private fun restartRelay(pairings: List<PairingInfo>) {
-        // A stop sent while the service is not running would LAUNCH it (plain
-        // startService), and its queued stopSelf() would then kill the relay
-        // right after the start intent below is processed. Only stop when
-        // the service is actually up.
-        if (AppState.conn.value != AppState.ConnState.IDLE) {
-            RelayForegroundService.Controller.stop(this)
-        }
         if (pairings.isNotEmpty()) {
-            RelayForegroundService.Controller.start(this)
+            // Reconfigure the current instance atomically. Stop-then-start
+            // intents can be handled by the same Service object and leave a
+            // freshly edited pairing stopped when the queued stop wins.
+            RelayForegroundService.Controller.reload(this)
         }
     }
 
@@ -353,8 +554,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requiredPerms(): List<MissingPerm> {
-        val perms = mutableListOf(
-            MissingPerm(
+        val enabledRoles = SessionStore.load(this).pairings
+            .asSequence()
+            .filter { it.enabled }
+            .map { it.role }
+            .toSet()
+        val required = PermissionPolicy.requiredFor(
+            enabledRoles = enabledRoles,
+            notificationsRequireRuntimePermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+        )
+        return buildList {
+            if (BaselinePermission.SMS in required) add(MissingPerm(
                 perms = listOf(
                     Manifest.permission.RECEIVE_SMS,
                     Manifest.permission.READ_SMS,
@@ -362,35 +572,20 @@ class MainActivity : ComponentActivity() {
                 icon = Icons.Filled.Send,
                 title = getString(R.string.perm_sms_title),
                 reason = getString(R.string.perm_sms_reason),
-            ),
-            MissingPerm(
+            ))
+            if (BaselinePermission.PHONE_STATE in required) add(MissingPerm(
                 perms = listOf(Manifest.permission.READ_PHONE_STATE),
                 icon = Icons.Filled.Phone,
                 title = getString(R.string.perm_phone_title),
                 reason = getString(R.string.perm_phone_reason),
-            ),
-            MissingPerm(
-                perms = listOf(Manifest.permission.READ_CONTACTS),
-                icon = Icons.Filled.Person,
-                title = getString(R.string.perm_contacts_title),
-                reason = getString(R.string.perm_contacts_reason),
-            ),
-            MissingPerm(
-                perms = listOf(Manifest.permission.ANSWER_PHONE_CALLS),
-                icon = Icons.Filled.Phone,
-                title = getString(R.string.perm_calls_title),
-                reason = getString(R.string.perm_calls_reason),
-            ),
-        )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms += MissingPerm(
+            ))
+            if (BaselinePermission.NOTIFICATIONS in required) add(MissingPerm(
                 perms = listOf(Manifest.permission.POST_NOTIFICATIONS),
                 icon = Icons.Filled.Notifications,
                 title = getString(R.string.perm_notif_title),
                 reason = getString(R.string.perm_notif_reason),
-            )
+            ))
         }
-        return perms
     }
 
     private fun missingRawPerms(): List<String> =
@@ -401,6 +596,83 @@ class MainActivity : ComponentActivity() {
     private fun refreshPermGate() {
         val missing = missingRawPerms().toSet()
         permGateMissing.value = requiredPerms().filter { it.perms.any { p -> p in missing } }
+    }
+
+    private fun refreshPermissionState() {
+        refreshNotifPermMissing()
+        refreshPermGate()
+        refreshLiveCallPermMissing()
+        refreshContactsPermission()
+    }
+
+    private fun refreshContactsPermission() {
+        contactsPermissionGranted.value = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.READ_CONTACTS,
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun contactPermissionNeedsSettings(): Boolean =
+        contactsPermissionAskAttempted.value &&
+            !contactsPermissionGranted.value &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.READ_CONTACTS)
+
+    private fun requestContactsPermission() {
+        if (contactsPermissionGranted.value) return
+        if (contactPermissionNeedsSettings()) {
+            openAppSettings()
+            return
+        }
+        requestingContactsPermission = true
+        permLauncher.launch(arrayOf(Manifest.permission.READ_CONTACTS))
+    }
+
+    private fun refreshLiveCallPermMissing() {
+        val pairings = SessionStore.load(this).pairings
+        liveCallPermMissing.value = if (PermissionPolicy.needsLiveCallPermissions(pairings)) {
+            listOf(
+                Manifest.permission.ANSWER_PHONE_CALLS,
+                Manifest.permission.RECORD_AUDIO,
+            ).filter {
+                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+            }
+        } else {
+            emptyList()
+        }
+        if (liveCallPermMissing.value.isEmpty()) {
+            showLiveCallPermissionPrompt.value = false
+        }
+    }
+
+    private fun liveCallPermissionNeedsSettings(): Boolean =
+        liveCallPermAskAttempted.value && liveCallPermMissing.value.any {
+            !shouldShowRequestPermissionRationale(it)
+        }
+
+    private fun requestLiveCallPermissions() {
+        val missing = liveCallPermMissing.value
+        if (missing.isEmpty()) {
+            showLiveCallPermissionPrompt.value = false
+            return
+        }
+        if (liveCallPermissionNeedsSettings()) {
+            showLiveCallPermissionPrompt.value = false
+            openAppSettings()
+            return
+        }
+        requestingLiveCallPermissions = true
+        permLauncher.launch(missing.toTypedArray())
+    }
+
+    private fun startRelayIfPermissionsReady() {
+        val session = SessionStore.load(this)
+        if (
+            session.relayEnabled &&
+            session.pairings.any { it.enabled } &&
+            permGateMissing.value.isEmpty()
+        ) {
+            restartRelay(session.pairings)
+        }
     }
 
     private fun requestMissingPerms() {
@@ -440,7 +712,7 @@ class MainActivity : ComponentActivity() {
             ContextCompat.checkSelfPermission(
                 this, Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
-        notifPermMissing.value = session.pairings.any { it.role == Role.RECEIVER } &&
+        notifPermMissing.value = session.pairings.any { it.enabled && it.role == Role.RECEIVER } &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !granted
     }
 
@@ -452,8 +724,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        refreshNotifPermMissing()
-        refreshPermGate()
+        val wasBlocked = permGateMissing.value.isNotEmpty()
+        refreshPermissionState()
+        if (wasBlocked && permGateMissing.value.isEmpty()) startRelayIfPermissionsReady()
     }
 }
 
@@ -465,6 +738,7 @@ sealed interface UiAction {
         val server: String,
         val transport: String?,
         val fbConfig: String?,
+        val liveCallEnabled: Boolean,
     ) : UiAction
     data object StartService : UiAction
     data object StopService : UiAction

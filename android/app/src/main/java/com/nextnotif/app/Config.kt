@@ -1,6 +1,7 @@
 package com.nextnotif.app
 
 object Config {
-    const val DEFAULT_SERVER = "ws://10.0.2.2:8000"
-    const val HTTP_DEFAULT_SERVER = "http://10.0.2.2:8000"
+    /** Production-safe default. Debug builds may still accept a ws:// LAN relay. */
+    const val DEFAULT_SERVER = "wss://relay.amberdogeorgia.com"
+    const val HTTP_DEFAULT_SERVER = "https://relay.amberdogeorgia.com"
 }

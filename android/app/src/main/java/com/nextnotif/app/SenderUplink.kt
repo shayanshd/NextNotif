@@ -9,6 +9,13 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 
+internal data class SenderUplinkResult(
+    val accepted: Boolean,
+    val deliveredDirectly: Boolean? = null,
+    val queuedCount: Int? = null,
+    val failure: String? = null,
+)
+
 /**
  * Short-lived uplink for the sender role. Instead of holding a websocket, the
  * sender POSTs each event to the relay the moment it happens and lets the
@@ -44,7 +51,10 @@ class SenderUplink(
         .build()
 
     /** POSTs one event. Returns true when the relay accepted it (delivered or queued). */
-    fun send(type: String, data: JSONObject): Boolean {
+    fun send(type: String, data: JSONObject): Boolean = sendDetailed(type, data).accepted
+
+    /** Same uplink with delivery detail for explicit, user-initiated diagnostics. */
+    internal fun sendDetailed(type: String, data: JSONObject): SenderUplinkResult {
         val payload = JSONObject().apply {
             put("type", type)
             put("data", data)
@@ -58,16 +68,30 @@ class SenderUplink(
         return try {
             client.newCall(req).execute().use { resp ->
                 Log.i(TAG, "send $type http=${resp.code}")
-                resp.isSuccessful
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    SenderUplinkResult(false, failure = "Relay returned HTTP ${resp.code}")
+                } else {
+                    parseAcceptedResponse(body)
+                }
             }
         } catch (t: Throwable) {
             Log.w(TAG, "send $type failed: ${t::class.simpleName}: ${t.message}", t)
-            false
+            SenderUplinkResult(false, failure = t.message ?: t::class.simpleName ?: "Network error")
         }
     }
 
     companion object {
         private const val TAG = "RelayUplink"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+        internal fun parseAcceptedResponse(body: String): SenderUplinkResult {
+            val json = runCatching { JSONObject(body) }.getOrNull()
+            return SenderUplinkResult(
+                accepted = true,
+                deliveredDirectly = json?.takeIf { it.has("delivered") }?.optBoolean("delivered"),
+                queuedCount = json?.takeIf { it.has("queued") }?.optInt("queued")?.coerceAtLeast(0),
+            )
+        }
     }
 }

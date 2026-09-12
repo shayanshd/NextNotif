@@ -54,11 +54,40 @@ import androidx.compose.ui.unit.dp
 const val TRANSPORT_WS = "ws"
 const val MIN_SECRET_LENGTH = 6
 
-/** Transport to preselect when opening the editor: Firebase only if the
- *  pairing is actually a Firebase relay; anything else (including relay
- *  pairings, whose transport persists as null) defaults to WS. */
-fun initialTransportFor(editing: PairingInfo?): String =
-    if (editing?.isFirebase == true) FirebaseRelay.TRANSPORT else TRANSPORT_WS
+/** New pairings default to battery-saving FCM. Existing legacy/null relay
+ *  pairings remain WebSocket so an upgrade never silently changes behavior. */
+fun initialTransportFor(editing: PairingInfo?): String = when {
+    editing == null -> FcmOnDemand.TRANSPORT
+    editing.isFirebase -> FirebaseRelay.TRANSPORT
+    editing.isFcmOnDemand -> FcmOnDemand.TRANSPORT
+    else -> TRANSPORT_WS
+}
+
+fun partnerStateFrom(statusJson: String, myRole: Role): Pair<AppState.ConnState, String?> {
+    val obj = org.json.JSONObject(statusJson)
+    val connected = if (myRole == Role.SENDER) {
+        obj.optBoolean("receiver_connected")
+    } else {
+        obj.optBoolean("sender_connected")
+    }
+    val hasFcm = if (myRole == Role.SENDER) {
+        obj.optBoolean("receiver_has_fcm")
+    } else {
+        obj.optBoolean("sender_has_fcm")
+    }
+    val raw = try {
+        if (myRole == Role.SENDER) obj.optString("receiver_name") else obj.optString("sender_name")
+    } catch (e: Exception) {
+        ""
+    }
+    val name = raw.takeIf { it.isNotBlank() && it != "null" }
+    val state = when {
+        connected -> AppState.ConnState.CONNECTED
+        hasFcm -> AppState.ConnState.ON_DEMAND
+        else -> AppState.ConnState.DISCONNECTED
+    }
+    return state to name
+}
 
 /** Parses a `/pair/{code}/status` body into (partnerOnline, partnerName).
  *  The partner is the slot opposite to [myRole]. A name is only returned when
@@ -66,17 +95,69 @@ fun initialTransportFor(editing: PairingInfo?): String =
  *  in the wild from a sinkholed/stale relay answer) both count as unknown, so
  *  the UI falls back to the "Partner" label instead of rendering "null". */
 fun partnerStatusFrom(statusJson: String, myRole: Role): Pair<Boolean, String?> {
-    val obj = org.json.JSONObject(statusJson)
-    val senderOk = obj.optBoolean("sender_connected")
-    val receiverOk = obj.optBoolean("receiver_connected")
-    val partnerOnline = if (myRole == Role.SENDER) receiverOk else senderOk
-    val raw = try {
-        if (myRole == Role.SENDER) obj.optString("receiver_name") else obj.optString("sender_name")
-    } catch (e: Exception) {
-        "" // some org.json builds throw on a missing key
+    val (state, name) = partnerStateFrom(statusJson, myRole)
+    return (state == AppState.ConnState.CONNECTED) to name
+}
+
+/** User-facing pairing state. Technical transport errors are mapped separately. */
+enum class PairingReadinessKind {
+    READY,
+    CHECKING_PARTNER,
+    WAITING_FOR_PARTNER,
+    NEEDS_NOTIFICATION_PERMISSION,
+    CONNECTING,
+    RETRYING,
+    OFFLINE,
+    PAUSED,
+}
+
+enum class PairingIssueKind {
+    FIREBASE_CONFIG,
+    ALERT_REGISTRATION,
+    QUEUE_SYNC,
+    ACCESS_DENIED,
+    NETWORK,
+    UNKNOWN,
+}
+
+fun pairingReadinessKind(
+    enabled: Boolean,
+    role: Role,
+    onDemand: Boolean,
+    ownState: AppState.ConnState,
+    partnerState: AppState.ConnState,
+    notificationPermissionMissing: Boolean,
+    error: String?,
+): PairingReadinessKind = when {
+    !enabled -> PairingReadinessKind.PAUSED
+    role == Role.RECEIVER && notificationPermissionMissing ->
+        PairingReadinessKind.NEEDS_NOTIFICATION_PERMISSION
+    !error.isNullOrBlank() -> PairingReadinessKind.RETRYING
+    ownState == AppState.ConnState.CONNECTING -> PairingReadinessKind.CONNECTING
+    ownState == AppState.ConnState.DISCONNECTED -> PairingReadinessKind.OFFLINE
+    ownState == AppState.ConnState.IDLE -> PairingReadinessKind.PAUSED
+    role == Role.RECEIVER && onDemand && ownState == AppState.ConnState.ON_DEMAND ->
+        PairingReadinessKind.READY
+    partnerState == AppState.ConnState.IDLE -> PairingReadinessKind.CHECKING_PARTNER
+    partnerState == AppState.ConnState.DISCONNECTED -> PairingReadinessKind.WAITING_FOR_PARTNER
+    else -> PairingReadinessKind.READY
+}
+
+fun pairingIssueKind(raw: String): PairingIssueKind {
+    val message = raw.lowercase()
+    return when {
+        "firebase config" in message || "apikey" in message || "databaseurl" in message ->
+            PairingIssueKind.FIREBASE_CONFIG
+        "fcm registration" in message || "register" in message && "alert" in message ->
+            PairingIssueKind.ALERT_REGISTRATION
+        "queue sync" in message -> PairingIssueKind.QUEUE_SYNC
+        "denied" in message || "unauthorized" in message || "forbidden" in message ->
+            PairingIssueKind.ACCESS_DENIED
+        "network" in message || "internet" in message || "timeout" in message ||
+            "failed to connect" in message || "unable to resolve" in message ||
+            "reach" in message -> PairingIssueKind.NETWORK
+        else -> PairingIssueKind.UNKNOWN
     }
-    val name = raw.takeIf { it.isNotBlank() && it != "null" }
-    return partnerOnline to name
 }
 
 /** Fixed dot colors for connection states (intentionally outside the
@@ -85,6 +166,7 @@ object ConnVisuals {
     fun dot(state: AppState.ConnState): Color = when (state) {
         AppState.ConnState.CONNECTED -> Color(0xFF16A34A)
         AppState.ConnState.LISTENING -> Color(0xFF3B82F6)
+        AppState.ConnState.ON_DEMAND -> Color(0xFF64748B)
         AppState.ConnState.CONNECTING -> Color(0xFFF59E0B)
         AppState.ConnState.DISCONNECTED -> Color(0xFFEF4444)
         AppState.ConnState.IDLE -> Color(0xFF9CA3AF)
@@ -95,6 +177,7 @@ object ConnVisuals {
             when (state) {
                 AppState.ConnState.CONNECTED -> "Online"
                 AppState.ConnState.LISTENING -> "Listening"
+                AppState.ConnState.ON_DEMAND -> "On demand"
                 AppState.ConnState.CONNECTING -> "Connecting"
                 AppState.ConnState.DISCONNECTED -> "Offline"
                 AppState.ConnState.IDLE -> "Unknown"
@@ -103,6 +186,7 @@ object ConnVisuals {
             when (state) {
                 AppState.ConnState.CONNECTED -> "Connected"
                 AppState.ConnState.LISTENING -> "Relaying"
+                AppState.ConnState.ON_DEMAND -> "Ready"
                 AppState.ConnState.CONNECTING -> "Connecting"
                 AppState.ConnState.DISCONNECTED -> "Offline"
                 AppState.ConnState.IDLE -> "Stopped"

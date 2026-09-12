@@ -9,6 +9,383 @@ connection status of every paired partner.
 
 Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
+## MVP execution roadmap (paused for handoff 2026-09-12)
+
+Implementation is paused at the user's request. The product goal is not complete;
+its current product-managed status is **paused**. Resume from
+[AGENT_HANDOFF.md](AGENT_HANDOFF.md), which distinguishes installed behavior from
+uninstalled changes and records the next tests and known defects.
+
+Immediate priorities on resumption:
+
+1. Fix duplicate Answer intents resetting an active call to Answering, and stale
+   notification intents overwriting the current call's identity.
+2. Verify and install the pending in-app Answer UI, without interrupting an unsaved
+   phone setup form. Latest unit tests, debug/release builds and debug lint pass.
+3. Confirm the Samsung owner's live-call opt-in, then explicitly invite the user to
+   place a controlled call. VPN-off, two-phone ICE with device audio disabled passed;
+   actual cellular WebRTC audio, volume, delay, mute and hang-up are not yet proven.
+4. Complete TURN/VPN support, authenticated setup/WebSocket hardening, delivery and
+   recovery tests, UX verification and the MVP release checklist.
+
+### MVP promise
+
+NextNotif turns an older Android phone into an unattended SIM gateway and a newer
+Android phone into its clear, dependable companion. The supported MVP forwards SMS
+and incoming-call identity/state on Android 8+ through FCM/HTTPS while idle. Remote
+answering with two-way cellular audio is an explicitly labelled **reference-device
+beta** that is off by default and can be enabled only on a rooted/capable Samsung
+SM-A520F sender; the app must remain fully useful when that beta is unavailable.
+
+MVP is reached only when a non-developer can pair two phones, understand whether the
+gateway is ready, receive and revisit messages/calls, recover from ordinary network
+failures, and identify when an action is required without reading a technical log.
+
+### P0 — required before an MVP build
+
+#### M0. Product boundary and safety
+
+- [x] Define the general Android MVP (SMS + call information) separately from the
+      rooted-A5 live-call beta.
+- [ ] Add plain-language disclosure before enabling live audio: reference device,
+      root requirement, relay encryption boundary, and local call-consent laws.
+- [x] Make live-call forwarding a per-sender opt-in that defaults off. A receiver must
+      show Answer only when the sender explicitly advertises an enabled, rooted, and
+      helper-capable gateway; normal call alerts never depend on root.
+- [ ] Ensure diagnostics and normal operation never persist raw call audio.
+
+#### M1. Friendly setup and recovery
+
+- [x] Replace the all-permissions-at-launch gate with a baseline role-aware gate:
+      notifications for receivers and SMS/phone state for senders; a fresh install
+      reaches pairing without unrelated permission prompts.
+- [x] Add contextual optional-permission prompts: microphone/answer-call access only
+      when live calling is enabled; sender caller-name lookup offers optional contacts
+      access with explanation, retry, and app-settings recovery.
+- [ ] Add a guided first-pairing flow with two-phone instructions, sensible FCM
+      default, validation, and a final readiness check.
+- [ ] Make every status actionable: Ready, Waiting for partner, Needs permission,
+      Offline, Reconnecting, and Live call active must each explain the next step.
+- [x] Add an in-app connection/notification self-test that does not require a real SMS
+      or cellular call and cannot trigger live-call controls.
+
+#### M2. Durable communication experience
+
+- [~] Keep Overview, Messages, and Activity as separate destinations.
+- [x] Persist a bounded SMS/call history independently of transient diagnostics,
+      tolerate corrupt storage, and restore it after process death/reboot.
+- [~] Show complete message content, caller identity, direction, call state, pairing,
+      and absolute time; pairing filters and confirmed clear-history are implemented.
+      End-to-end delivery acknowledgments/results still need verification.
+- [ ] Verify stacked notifications, notification tap destinations, and history
+      de-duplication across authenticated queue retries. FCM is wake-only and never
+      renders communication content directly.
+
+#### M3. FCM-idle relay correctness
+
+- [x] Register both devices with FCM and carry idle SMS/call events through HTTPS + FCM.
+- [x] Close both persistent WebSockets while idle and open temporary authenticated
+      sockets only for a live call.
+- [x] Replace pairing-edit stop/start races with an atomic in-service configuration
+      reload so saving a transport change cannot leave the gateway stopped.
+- [x] Persist the user's relay Start/Stop intent and restore enabled pairings after
+      process recreation, reboot, or app replacement without reviving an explicit Stop.
+- [~] Add and verify explicit timeouts for unanswered calls, temporary-socket rendezvous,
+      reconnect attempts, and orphaned calls; always return to FCM Ready afterward.
+      Bounded cleanup and a no-media watchdog are implemented; physical failure tests remain.
+- [ ] Prove delivery after receiver force-stop, reboot, Doze, Wi-Fi/LTE change, and a
+      temporary relay outage; queued events must arrive once and in order.
+- [x] Make outbox replay crash-safe: never erase an event before its successful send is
+      acknowledged; preserve ordering, cap behavior, and corrupt-storage recovery.
+- [ ] Add event IDs/acknowledgments, queue TTL and visible overflow, and handle FCM token
+      rotation/invalid-token recovery without duplicate notifications.
+      Non-destructive `/fetch` plus specific-ID `/ack` and checked, atomic local history/
+      replay protection are implemented locally. Python recovery tests and Android
+      builds/tests pass; Worker verification and staged deployment remain. Temporary
+      FCM receiver sockets now advertise their delivery mode; Python keeps backlog
+      and new durable events on fetch/ACK while controls/audio stay live (smoke passed).
+      Worker focused parity and final integrated full suite pass. Compatible relay
+      deployed as `9d1489af-35c8-4da4-909c-522cf3051e6d` before successful updates on
+      both test phones. Opt-in physical labelled delivery/retry tests pass on Samsung
+      and Xiaomi, with one durable event-ID history entry; crash/notification/Doze
+      tests remain. Legacy persistent WebSocket queue replay still
+      needs equivalent safeguards; do not claim universal delivery durability yet.
+
+#### M4. Reference A5 live-call beta
+
+- [x] Remote Answer/Hang up, dedicated call UI, rooted A5 digital downlink capture,
+      modem-uplink injection, G.711 media, and bounded backpressure are functional.
+- [x] Use startup jitter buffering and adaptive playout instead of abrupt whole-frame
+      deletion; add deterministic unit coverage for the policy.
+- [x] Instrument each call with setup time, reconnect count, queue high-water mark,
+      underrun/drop count, and end reason—never raw audio.
+- [ ] Complete 10 repeated calls (including 5+ minutes), with no stuck Connecting state,
+      no growing delay, intelligible audio both ways, and clean FCM return after hangup.
+- [x] Label unsupported senders clearly and leave Answer/audio controls hidden or
+      disabled without the proven privileged gateway capability.
+- [x] Enforce the opt-in at runtime: missing root/helper permission must prevent the
+      temporary media socket and remote call controls while SMS/call-info forwarding
+      continues normally.
+
+#### M5. Privacy, security, and release engineering
+
+- [ ] Replace code-only bootstrap and HTTPS operations with a high-entropy, expiring
+      invite plus role-scoped device credentials. A leaked 6-digit display code alone
+      must not join/take over a role, inject events/audio/control, drain a queue, replace
+      an FCM token, or read status.
+      Planned migration: explicit legacy records keep the test phones working;
+      new secure records use one-use 32-byte invites, 15-minute expiry, hashed
+      role-scoped credentials, and authenticated metadata/takeover. Enable secure
+      creation only after all endpoint/WS authorization guards and negative tests
+      pass; never upgrade legacy ownership based on code-mintable old tokens.
+      Interim credential-retention fix is tested: pairing edits discard device
+      tokens when server authority, role, code, or Firebase backend/project changes.
+      Python secure state-machine foundation is implemented/tested (not exposed by
+      endpoints): one-use expiring invites, hashed role credentials, owner revocation,
+      strict restoration, and secret-safe grant representations. Next: persist secure
+      records and enforce every HTTP/WS guard before enabling secure creation; Worker
+      parity and Android invite/Keystore UX follow. Existing live pairings remain legacy.
+      Transactional Python secure storage now passes restart, concurrent one-use
+      consumption, rollback, duplicate-code protection, secret-at-rest, and corrupt
+      record tests (16 foundation/storage tests total). SQLite storage is isolated
+      from legacy JSON pairings until endpoint guards and creation collision checks
+      are complete; no secure creation is exposed yet.
+      Python pre-authentication peer leak is fixed and full smoke passes: pending
+      sockets cannot receive queued content, advertise connectivity/name/FCM data,
+      or occupy the authenticated slot. Worker parity review and role-credential
+      endpoint enforcement remain; code-only legacy bootstrap is still insecure.
+      Python secure-record HTTP/WS guards now pass local negative smoke tests:
+      sender-only send, receiver-only FCM/queue operations, authenticated status,
+      credential-required WS, no legacy token minting, missing-store fail-closed,
+      and persisted namespace markers. Secure sockets revalidate credentials on
+      incoming frames. Creation remains disabled; Worker parity, namespace/queue
+      atomic creation, immediate revocation teardown, Android invite/Keystore UX,
+      and session-bound control/media remain before secure public release.
+      Python owner-only `/pair/{code}/revoke` now immediately detaches/closes the
+      target socket, clears role FCM/queue data, and checks cleanup persistence.
+      Full smoke and 16 foundation/storage tests pass, including failed cleanup
+      writes, credential denial afterward, safe owner retry, and persisted purge.
+      Owner self-removal through device revocation is rejected; it uses whole-pair
+      deletion instead. Worker parity remains; not deployed.
+      Python whole-pair DELETE is implemented/tested: checked deletion reservations
+      prevent code-only recreation, both sockets/data are purged, credentials are
+      deleted, and owner-hash cleanup-only retries survive restart/storage failure.
+      Full local smoke and 17 security/storage tests pass; Worker parity and secure
+      creation/setup/session authorization remain before public release.
+      Worker security transitions now pass seven Node tests plus an isolated local
+      workerd runtime check using native timing-safe comparisons: invite rejection,
+      role binding, restoration, owner-only revocation/deletion, and secret-safe
+      serialization. This helper is not wired into relay routes. Atomic Durable
+      Object storage/one-use concurrency and complete endpoint guards remain;
+      secure creation stays disabled and live legacy pairings are unchanged.
+      Transactional Worker storage is now implemented in an isolated module:
+      versioned compare-and-swap, atomic namespace reservation, checked sync before
+      grant release, and fail-closed restoration. Eleven Node security/storage
+      tests pass, including collision, rollback, sync failure, and 12 competing
+      consumers. The isolated SQLite-backed local DO runtime also produced exactly
+      one committed grant for 12 simultaneous consumers. Actual relay integration,
+      eviction/restart checks, legacy-backend runtime parity, and HTTP/WS guards
+      remain; no production routes or phone credentials have changed.
+      Worker HTTP guards are now integrated and pass an isolated real-relay-class
+      runtime test: sender-only send, receiver-only registration/fetch/ack/drain,
+      authenticated status, rejection without metadata/token/queue changes, and
+      inconsistent/missing secure records quarantined rather than downgraded.
+      Secure WS currently rejects before takeover or legacy bootstrap; its fully
+      authenticated lifecycle is the next implementation step. Secure creation
+      remains disabled and none of this security rollout is deployed yet.
+- [ ] Add pairing revocation/rotation plus call session IDs and command nonces so replayed
+      Answer/End requests are rejected and removing a device invalidates it remotely.
+- [x] Remove development cleartext/network defaults from release builds while retaining
+      a debug-only LAN option for development or controlled sideload testing.
+- [ ] Review exported components, logs, notification privacy, secrets, backup policy,
+      FCM payload contents, and retention; document what the relay can observe.
+- [~] Use wake-only FCM pushes followed by authenticated HTTPS fetch: Android and both
+      relays are implemented, Python smoke passes, and Android ignores legacy push
+      content; final Worker deployment/physical revalidation remain.
+- [ ] Add versioning, release signing/config separation, reproducible CI artifacts,
+      crash-safe migrations, and an upgrade test from the current installed build.
+- [x] Refresh README/user help so FCM is the default architecture and the live-call
+      limitations match the implementation.
+
+- [~] **Live-call MVP gate (promoted 2026-09-12):** replace G.711-over-WebSocket media
+      with WebRTC/Opus, STUN, and short-lived TURN credentials while retaining FCM
+      idle delivery and WS signaling only. Optional/root-gated live calls are not
+      MVP-ready on the prototype transport. Pinned native dependency and role-aware
+      audio-device factory compile in the debug APK. Session-bound offer/answer/ICE
+      validation and bounded early-ICE buffering are added; all six new unit tests,
+      the full debug unit suite, debug/release APK builds, release shrinking, and
+      debug lint pass against the latest changes. No WebRTC call is wired or tested yet.
+      Audio-only WebRtcCallPeer is implemented and compiles with the pinned API:
+      native audio tracks, Opus-only codec preferences, serialized SDP callbacks,
+      local/remote early-ICE ordering, force-relay configuration, mute, and owned
+      resource disposal. Unit suite passes; this does not prove native negotiation
+      or cleanup behavior. Engine runtime tests, service/mixer lifecycle wiring,
+      server signaling/session guards, TURN provisioning, and physical calls remain.
+      Native ABI/API smoke now passes on Samsung Android 8 and Xiaomi: audio-only
+      Opus offer creation with recording/playout disabled and no SDP applied.
+      Both phones received the latest debug groundwork APK without clearing data;
+      normal startup was restored. This is not proof of WebRtcCallPeer negotiation,
+      ICE/TURN, sender downlink/mixer operation, or two-way live-call quality.
+      Actual peer-engine no-audio loopback and rejected-signaling cleanup both
+      pass on Samsung Android 8 and Xiaomi after review fixes. Subagent review fixes pre-start mute loss and
+      bounds signaling executor admission; three new mute-policy tests, full
+      unit suite, debug/release builds and lint pass. Stable APK installation retry
+      succeeded; normal apps restored without clearing data. The audio lifecycle
+      wrapper now prepares the root mixer, preserves mute and restores mode only
+      after native disposal. Service selects it with sender-ready handoff, native
+      CONNECTED UI, fresh SDP/ICE sessions, ordered bounded live controls and a
+      teardown barrier. Initial ICE is host-only/LAN; no G.711 fallback. Service
+      device testing and STUN/TURN provisioning remain. Native received-audio RTP
+      watchdog is implemented with bounded stats requests, fresh-sample stall
+      confirmation and separate unavailable-telemetry warnings; physical silence,
+      mute and media-interruption validation remain.
+      Matching WebRTC service APK installed on both phones without clearing data;
+      host-only no-audio native negotiation/stats callback/cleanup tests pass
+      (Samsung 0.370 s, Xiaomi 0.358 s). Normal app startup restored. Real cellular
+      forwarding and audible RTP counters remain unverified on this transport.
+      Native capability parameter mutation was experimentally rejected; corrected
+      engine keeps advertised capabilities intact and validates Opus DTX-off SDP.
+      Latest APKs installed preserving data; three no-audio native offer/answer,
+      negotiation/stats/cleanup tests pass on Samsung and Xiaomi, with apps restored.
+      **Two-phone ICE gate now contradicts LAN readiness:** stronger no-audio
+      physical probe fails on both phones despite same-subnet Wi-Fi and bounded
+      direct ping reachability. Candidate gathering/delivery and VPN/UDP routing
+      need diagnosis before a real call; fixture/reverse cleanup complete.
+      Controlled comparison after user paused Xiaomi VPN now passes physical
+      host-only ICE on both phones, including two-second hold and stats callbacks.
+      Prior tunnel/policy routing and candidate aggregate diagnostics strongly
+      implicate VPN routing; VPN/TURN remains a release gate. Real call awaits
+      explicit Samsung opt-in (currently safe-default off), not ICE on current LAN.
+      First inbound-RTP diagnostic and bounded five-second Android8 root hang-up
+      are implemented locally; unit tests, debug/release builds and lint pass.
+      Installed on both phones preserving saved data; first-RTP and remote hang-up
+      still require real-call validation.
+      Existing-pairing local preferences now save without relay reachability:
+      identity/role/authority/transport/project must match exactly (normalized
+      server whitespace/trailing slash only). Credential/settings copy preserved;
+      identity changes retain normal setup preflight. Three targeted tests, full
+      unit suite, debug/release builds and lint pass; physical offline-save
+      verification remains. Samsung foreground Edit pairing was observed stuck
+      on Connecting after Save in the previous build. Corrected APK installed on
+      both phones preserving saved data; edit form closes and live opt-in must be
+      retried normally. Actual offline-save/permission-prompt proof still pending.
+      Negotiation, call-session binding, ICE/TURN, teardown, release validation, and
+      physical Samsung/Xiaomi quality/soak checks remain. See WEBRTC_MIGRATION.md.
+
+### P1 — beta quality after MVP
+
+- [ ] Add accessible localization-ready copy, large-text testing, RTL verification,
+      notification privacy controls, export, and configurable retention.
+- [ ] Add remote gateway health (battery, charging, network, last seen) and receiver-side
+      troubleshooting without exposing technical activity by default.
+- [ ] Expand the privileged-device compatibility matrix only through controlled probes;
+      never promise universal Android call-audio support.
+
+### MVP acceptance matrix
+
+- [ ] **Fresh setup:** a new user pairs Samsung sender + Xiaomi receiver and reaches
+      Ready in under five minutes without ADB or editing stored preferences.
+- [ ] **Messaging:** 20 mixed single/multipart/Unicode SMS events arrive once, in order,
+      notify correctly, and remain in history across reboot.
+- [ ] **Call information:** 10 incoming calls show correct identity/state and never leave
+      a stale active-call UI after either side hangs up; unrooted/opted-out senders show
+      notifications without an Answer action.
+- [ ] **Idle efficiency:** relay status shows no receiver WebSocket between calls; FCM
+      wakes the receiver and both phones return to idle mode after every call.
+- [ ] **Live-call beta:** 10/10 reference-device calls establish or fail with a clear
+      reason; successful calls remain intelligible with bounded latency for five minutes.
+- [ ] **Recovery:** reboot, Doze, process death, network handoff, and relay interruption
+      recover automatically or present one clear action.
+- [ ] **Release:** JVM, Android device, Python relay, Worker smoke, release/lint, migration,
+      and two-physical-device E2E checks are green from a clean checkout.
+
+### Explicitly out of scope for MVP
+
+- Universal cellular call-audio capture/injection on unrooted Android phones.
+- Play Store distribution of the privileged A5 gateway build.
+- User accounts, cloud message sync across more than the paired devices, call recording,
+  iOS support, or end-to-end encrypted media. These require separate product/security
+  decisions and must not delay the focused two-phone MVP.
+
+## Gateway calling experiments (Samsung SM-A520F, Android 8)
+
+The first reference sender is a stock Samsung Galaxy A5 SM-A520F running Android 8.
+Experiments are deliberately staged so no bootloader, root, or system partition change
+is made until the stock firmware has been measured.
+
+### Milestone G1 — stock capability diagnostics
+
+- [x] Add an on-demand **Gateway diagnostics** screen, available from the home overflow menu.
+- [x] Show device/firmware identity, current call state, answer-call permission state, and microphone permission state.
+- [x] Probe `MIC`, `VOICE_COMMUNICATION`, `VOICE_CALL`, `VOICE_UPLINK`, and `VOICE_DOWNLINK`
+      sequentially during a controlled call.
+- [x] Keep PCM only in memory, report signal level/non-zero ratio, and discard every sample.
+- [x] Make the report copyable and explicitly avoid claiming that a detected microphone signal is caller audio.
+- [ ] Run and preserve two reports from the physical A5: one idle baseline and one answered-call probe.
+- [ ] Repeat the answered-call probe with earpiece, speakerphone, wired headset, and Bluetooth routes.
+
+### Milestone G2 — remote call control
+
+- [x] Add authenticated receiver-to-sender Answer and End control messages over the paired WebSocket.
+- [x] Add a receiver notification Answer action that opens a dedicated live-call screen.
+- [x] Validate that the sender is ringing before Answer; show answering, connecting, connected,
+      reconnecting, ended, and failed phases on the receiver.
+- [x] Add End call and an ongoing call notification with a Hang up action.
+
+### Milestone G3 — stock audio feasibility
+
+- [ ] Compare idle and in-call diagnostic reports to identify sources that expose meaningful signal.
+- [ ] Perform a controlled caller-speech/sender-silence test; do not infer downlink access from energy alone.
+- [ ] If digital downlink is available, stream a one-way, opt-in Opus/WebRTC prototype to the receiver.
+- [ ] Measure latency, dropout, route changes, and echo behavior; store metrics, never raw call audio by default.
+
+### Milestone G5 — rooted A5 full-duplex prototype
+
+- [x] Prove A5 `VOICE_DOWNLINK` capture and root-only `DMIX_OUT` telephony-uplink injection.
+- [x] Complete a bidirectional call between the rooted A5 sender and Xiaomi receiver.
+- [x] Add G.711 mu-law media frames, bounded playback, outbound WebSocket backpressure,
+      stale-socket rejection, resumable call state, and a visible receiver call surface.
+- [x] Live stability check (2026-09-11): 68-second call completed without a WebSocket failure;
+      both peers remained connected afterward. Occasional single-frame playout drops remain.
+- [ ] Replace TCP WebSocket media with WebRTC/Opus over UDP plus TURN fallback for production latency,
+      jitter buffering, loss concealment, and network handoff behavior.
+
+### Milestone G4 — privileged gateway research (conditional)
+
+- [ ] Proceed only if stock results justify it and the device owner explicitly accepts Samsung/root consequences.
+- [ ] Back up the phone and record exact firmware/baseband/build identifiers before modification.
+- [ ] Inspect Samsung audio policy, mixer paths, AudioFlinger, and telephony routes with a minimal privileged helper.
+- [ ] Test digital call downlink capture before attempting any uplink work.
+- [ ] Research telephony-uplink injection as a device-specific Audio HAL problem; no compatibility promise.
+
+### Exit criteria
+
+- **Broad feature:** remote Answer/Reject works without root and cannot be triggered by an unauthenticated or replayed command.
+- **A5 one-way audio:** controlled tests prove the receiver hears caller speech from a digital path, not an acoustic microphone path.
+- **A5 full duplex:** receiver speech reaches the cellular caller with acceptable echo and latency across repeated calls.
+- A failed audio milestone leaves SMS, caller ID, notifications, and call control intact and supported.
+
+### Milestone G5 — FCM-idle hybrid calling
+
+- [~] Keep SMS and call-state delivery on FCM/HTTPS while idle; do not maintain a receiver WebSocket.
+- [~] Open a temporary authenticated sender socket when the gateway begins ringing.
+- [~] Open a temporary authenticated receiver socket only after the user taps Answer.
+- [~] Carry answer/end/resume signaling and the proven G.711 prototype audio on the temporary sockets.
+- [~] Close both call sockets on IDLE/end and explicitly restore the receiver to FCM on-demand mode.
+- [ ] Add timeouts for unanswered calls and failed temporary-socket rendezvous.
+- [ ] Replace temporary WebSocket media with WebRTC/Opus while retaining WebSocket only for SDP/ICE signaling.
+- [ ] Add STUN plus short-lived TURN credentials so calls survive different NATs and restrictive networks.
+- [ ] Measure setup time, mouth-to-ear latency, dropouts, reconnects, and battery use against the always-on WS baseline.
+
+### Milestone U1 — receiver information architecture
+
+- [~] Split the home experience into Overview, Messages & calls, and Activity log destinations.
+- [~] Keep pairing health and controls in Overview.
+- [~] Put human communication events—texts, caller identity, and call outcomes—in Messages & calls.
+- [~] Reserve Activity log for connection, retry, queue, and live-call diagnostics.
+- [ ] Persist a bounded message history separately from the transient technical log.
+- [ ] Add per-pairing filtering and clear-history controls after the split is validated on both device sizes.
+
 ---
 
 ## 1. Requirements vs. status

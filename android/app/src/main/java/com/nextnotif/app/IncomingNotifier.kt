@@ -10,9 +10,30 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
+internal enum class CallNotificationAction { ANSWER, HANG_UP }
+
+internal fun callNotificationAction(
+    state: String,
+    code: String?,
+    liveCallAvailable: Boolean,
+): CallNotificationAction? = when {
+    !liveCallAvailable || code == null -> null
+    state == "RINGING" -> CallNotificationAction.ANSWER
+    state == "OFFHOOK" -> CallNotificationAction.HANG_UP
+    else -> null
+}
+
 object IncomingNotifier {
 
-    private fun notify(ctx: Context, title: String, body: String, id: Int) {
+    private fun notify(
+        ctx: Context,
+        title: String,
+        body: String,
+        id: Int,
+        actionLabel: String? = null,
+        actionIntent: Intent? = null,
+        actionOpensActivity: Boolean = false,
+    ) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -25,7 +46,7 @@ object IncomingNotifier {
             Intent(ctx, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE,
         )
-        val n = NotificationCompat.Builder(ctx, Notifications.CHANNEL_INCOMING)
+        val builder = NotificationCompat.Builder(ctx, Notifications.CHANNEL_INCOMING)
             .setSmallIcon(R.drawable.ic_stat_relay)
             .setContentTitle(title)
             .setContentText(body)
@@ -33,8 +54,25 @@ object IncomingNotifier {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(pi)
-            .build()
-        nm.notify(id, n)
+        if (actionLabel != null && actionIntent != null) {
+            val actionPi = if (actionOpensActivity) {
+                PendingIntent.getActivity(
+                    ctx,
+                    id + 10_000,
+                    actionIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+            } else {
+                PendingIntent.getService(
+                    ctx,
+                    id + 10_000,
+                    actionIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+            }
+            builder.addAction(0, actionLabel, actionPi)
+        }
+        nm.notify(id, builder.build())
     }
 
     fun notifySms(ctx: Context, from: String, body: String, name: String? = null) {
@@ -42,7 +80,23 @@ object IncomingNotifier {
         notify(ctx, title, body, 1000 + (from.hashCode() and 0xFF))
     }
 
-    fun notifyCall(ctx: Context, number: String, state: String, name: String? = null) {
+    fun notifyRelayTest(ctx: Context, code: String?) {
+        notify(
+            ctx,
+            "NextNotif relay test",
+            RelaySelfTest.DEFAULT_MESSAGE,
+            1200 + ((code ?: "relay-test").hashCode() and 0xFF),
+        )
+    }
+
+    fun notifyCall(
+        ctx: Context,
+        number: String,
+        state: String,
+        name: String? = null,
+        code: String? = null,
+        liveCallAvailable: Boolean = false,
+    ) {
         val label = when {
             name != null && number != "unknown" -> "$name ($number)"
             name != null -> name
@@ -56,6 +110,33 @@ object IncomingNotifier {
             else -> label?.let { "Call from $it ($state)" } ?: "Call $state"
         }
         val detail = if (number != "unknown") number else (label ?: "")
-        notify(ctx, title, detail, 1100 + (number.hashCode() and 0xFF))
+        val actionKind = callNotificationAction(state, code, liveCallAvailable)
+        val action = when (actionKind) {
+            CallNotificationAction.ANSWER -> RelayCallActivity.createIntent(
+                ctx,
+                requireNotNull(code),
+                number,
+                name,
+                answer = true,
+            )
+            CallNotificationAction.HANG_UP -> Intent(ctx, RelayForegroundService::class.java)
+                .setAction(RelayForegroundService.ACTION_END_RELAY_CALL)
+                .putExtra("code", requireNotNull(code))
+            null -> null
+        }
+        val actionLabel = when (actionKind) {
+            CallNotificationAction.ANSWER -> "Answer here"
+            CallNotificationAction.HANG_UP -> "Hang up"
+            null -> null
+        }
+        notify(
+            ctx,
+            title,
+            detail,
+            1100 + (number.hashCode() and 0xFF),
+            actionLabel,
+            action,
+            actionOpensActivity = actionKind == CallNotificationAction.ANSWER,
+        )
     }
 }

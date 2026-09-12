@@ -7,6 +7,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppStateTest {
+    @Test
+    fun delayedCommunicationPreservesSourceTimestamp() {
+        assertEquals(1_000L, communicationTimestamp(JSONObject().put("ts", 1_000L), 10_000L))
+        AppState.pushIncoming("sms", JSONObject().put("from", "caller").put("body", "queued").put("ts", 1_000L))
+        assertEquals(1_000L, AppState.log.value.first().ts)
+    }
+
+    @Test
+    fun missingInvalidOrFarFutureTimestampUsesReceiptTime() {
+        listOf(JSONObject(), JSONObject().put("ts", -1L), JSONObject().put("ts", 400_001L))
+            .forEach { assertEquals(10_000L, communicationTimestamp(it, 10_000L)) }
+    }
+
 
     @Test
     fun pushPrependsAndCapsLogAt50() {
@@ -54,10 +67,11 @@ class AppStateTest {
 
     @Test
     fun pushOutgoingSmsFormats() {
-        AppState.pushOutgoing("sms", JSONObject().put("from", "+15559998888"))
+        AppState.pushOutgoing("sms", JSONObject().put("from", "+15559998888").put("body", "Complete text"))
         val entry = AppState.log.value.first()
         assertEquals("OUT", entry.tag)
-        assertEquals("SMS → +15559998888", entry.message)
+        assertEquals("SMS → +15559998888: Complete text", entry.message)
+        assertEquals("Complete text", entry.communication?.body)
     }
 
     @Test
@@ -99,6 +113,13 @@ class AppStateTest {
         assertEquals(AppState.ConnState.CONNECTING, AppState.conn.value)
         AppState.setConnState("222222", AppState.ConnState.CONNECTED)
         assertEquals(AppState.ConnState.CONNECTED, AppState.conn.value)
+    }
+
+    @Test
+    fun aggregateKeepsOnDemandReadyWithoutSocket() {
+        AppState.clearStates()
+        AppState.setConnState("111111", AppState.ConnState.ON_DEMAND)
+        assertEquals(AppState.ConnState.ON_DEMAND, AppState.conn.value)
     }
 
     @Test

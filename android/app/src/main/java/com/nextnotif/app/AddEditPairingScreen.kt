@@ -1,6 +1,7 @@
 package com.nextnotif.app
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,16 +19,19 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -40,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role as SemanticRole
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -55,6 +60,11 @@ fun AddEditPairingScreen(
     error: String?,
     onBack: () -> Unit,
     onGenerateCode: (server: String, onResult: (code: String?, failure: String?) -> Unit) -> Unit,
+    contactsPermissionGranted: Boolean,
+    contactsPermissionDenied: Boolean,
+    contactsPermissionNeedsSettings: Boolean,
+    onRequestContactsPermission: () -> Unit,
+    onOpenAppSettings: () -> Unit,
     onSubmit: (
         label: String?,
         role: Role,
@@ -62,6 +72,7 @@ fun AddEditPairingScreen(
         server: String,
         transport: String?,
         fbConfig: String?,
+        liveCallEnabled: Boolean,
     ) -> Unit,
 ) {
     val isEdit = editing != null
@@ -69,17 +80,19 @@ fun AddEditPairingScreen(
     var role by remember { mutableStateOf<Role?>(editing?.role) }
     var code by remember { mutableStateOf(editing?.code ?: "") }
     var server by remember { mutableStateOf(editing?.server ?: Config.DEFAULT_SERVER) }
-    // New pairings default to the zero-config Firebase relay (matching the
-    // old setup flow); editing keeps whatever the pairing already uses
-    // (relay pairings persist transport=null, which means WS).
+    // New pairings default to on-demand FCM; editing preserves the existing
+    // choice (legacy relay pairings persist transport=null, which means WS).
     var transport by remember { mutableStateOf(initialTransportFor(editing)) }
     var fbConfig by remember { mutableStateOf(editing?.fbConfig ?: "") }
     var ownProject by remember {
         mutableStateOf(editing?.fbConfig?.isNotBlank() == true)
     }
     var generating by remember { mutableStateOf(false) }
+    var liveCallEnabled by remember { mutableStateOf(editing?.liveCallEnabled ?: false) }
+    var showContactsExplanation by remember { mutableStateOf(false) }
 
     val isFirebase = transport == FirebaseRelay.TRANSPORT
+    val isFcmOnDemand = transport == FcmOnDemand.TRANSPORT
     val fbParsed = remember(fbConfig) { FirebaseConfig.parse(fbConfig) }
     val ready = when {
         role == null || code.length != 6 -> false
@@ -140,31 +153,150 @@ fun AddEditPairingScreen(
                         icon = Icons.Filled.Notifications,
                         title = stringResource(R.string.setup_receiver),
                         description = stringResource(R.string.setup_receiver_desc),
-                        onClick = { role = Role.RECEIVER },
+                        onClick = {
+                            role = Role.RECEIVER
+                            liveCallEnabled = false
+                            showContactsExplanation = false
+                        },
                         modifier = Modifier.weight(1f),
                     )
                 }
             }
 
+            if (role == Role.SENDER) {
+                FieldCard(
+                    label = stringResource(R.string.setup_contacts_label),
+                    helper = stringResource(R.string.setup_contacts_helper),
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Person,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp),
+                            )
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    text = stringResource(
+                                        if (contactsPermissionGranted) R.string.setup_contacts_enabled
+                                        else R.string.setup_contacts_title
+                                    ),
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+                                Text(
+                                    text = stringResource(
+                                        if (contactsPermissionDenied) R.string.setup_contacts_denied
+                                        else R.string.setup_contacts_body
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (contactsPermissionDenied) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            }
+                        }
+                        if (!contactsPermissionGranted) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (contactsPermissionNeedsSettings) {
+                                        onOpenAppSettings()
+                                    } else {
+                                        showContactsExplanation = true
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    stringResource(
+                                        when {
+                                            contactsPermissionNeedsSettings -> R.string.perm_gate_settings
+                                            contactsPermissionDenied -> R.string.setup_contacts_retry
+                                            else -> R.string.setup_contacts_allow
+                                        },
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+
+                FieldCard(
+                    label = stringResource(R.string.setup_live_call_label),
+                    helper = stringResource(R.string.setup_live_call_helper),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .toggleable(
+                                value = liveCallEnabled,
+                                role = SemanticRole.Switch,
+                                onValueChange = { liveCallEnabled = it },
+                            )
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = stringResource(R.string.setup_live_call_title),
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+                            Text(
+                                text = stringResource(R.string.setup_live_call_body),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = liveCallEnabled,
+                            onCheckedChange = null,
+                        )
+                    }
+                }
+            }
+
             FieldCard(label = stringResource(R.string.setup_connection_label)) {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     TransportOption(
-                        selected = !isFirebase,
+                        selected = isFcmOnDemand,
+                        title = stringResource(R.string.setup_transport_fcm),
+                        description = stringResource(R.string.setup_transport_fcm_desc),
+                        onClick = { transport = FcmOnDemand.TRANSPORT },
+                        modifier = Modifier.fillMaxWidth(),
+                        badge = stringResource(R.string.setup_fb_recommended),
+                    )
+                    TransportOption(
+                        selected = transport == TRANSPORT_WS,
                         title = stringResource(R.string.setup_transport_ws),
                         description = stringResource(R.string.setup_transport_ws_desc),
                         onClick = { transport = TRANSPORT_WS },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     TransportOption(
                         selected = isFirebase,
                         title = stringResource(R.string.setup_transport_fb),
                         description = stringResource(R.string.setup_transport_fb_desc),
                         onClick = { transport = FirebaseRelay.TRANSPORT },
-                        modifier = Modifier.weight(1f),
-                        badge = stringResource(R.string.setup_fb_recommended),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }
@@ -310,12 +442,40 @@ fun AddEditPairingScreen(
                     selectedRole,
                     code,
                     server,
-                    if (isFirebase) FirebaseRelay.TRANSPORT else null,
+                    when {
+                        isFirebase -> FirebaseRelay.TRANSPORT
+                        isFcmOnDemand -> FcmOnDemand.TRANSPORT
+                        else -> null
+                    },
                     if (useOwn && fbConfig.isNotBlank()) fbConfig.trim() else null,
+                    liveCallEnabledFor(selectedRole, liveCallEnabled),
                 )
             }
 
             Spacer(Modifier.height(16.dp))
         }
+    }
+
+    if (showContactsExplanation && PermissionPolicy.offersContactNameLookup(role)) {
+        AlertDialog(
+            onDismissRequest = { showContactsExplanation = false },
+            title = { Text(stringResource(R.string.setup_contacts_dialog_title)) },
+            text = { Text(stringResource(R.string.setup_contacts_dialog_body)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showContactsExplanation = false
+                        onRequestContactsPermission()
+                    },
+                ) {
+                    Text(stringResource(R.string.setup_contacts_allow))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showContactsExplanation = false }) {
+                    Text(stringResource(R.string.live_call_perm_not_now))
+                }
+            },
+        )
     }
 }

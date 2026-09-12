@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 
 class FakeSharedPreferences : SharedPreferences {
     val data = HashMap<String, Any>()
+    var failCommits = false
 
     override fun getAll(): MutableMap<String, Any> = data.toMutableMap()
 
@@ -71,7 +72,7 @@ class FakeSharedPreferences : SharedPreferences {
 
         override fun commit(): Boolean {
             apply()
-            return true
+            return !failCommits
         }
 
         override fun apply() {
