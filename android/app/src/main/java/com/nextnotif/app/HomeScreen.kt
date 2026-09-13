@@ -1,5 +1,8 @@
 package com.nextnotif.app
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -14,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -108,15 +112,21 @@ fun HomeScreen(
     val running = connState != AppState.ConnState.IDLE &&
         connState != AppState.ConnState.DISCONNECTED
     var showEntry by remember { mutableStateOf<AppState.Entry?>(null) }
-    var destination by remember { mutableStateOf(HomeDestination.OVERVIEW) }
-    var selectedMessagePairing by remember { mutableStateOf<String?>(null) }
+    var destination by rememberSaveable { mutableStateOf(HomeDestination.OVERVIEW) }
+    var selectedMessagePairing by rememberSaveable { mutableStateOf<String?>(null) }
     var showClearHistoryConfirm by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val pairingNames = remember(pairings) { pairings.associate { it.code to it.displayName } }
-    val activity = log.filterNot(MessageStore::isHumanCommunication)
+    val activity = (log.filterNot(MessageStore::isHumanCommunication) + messages.filter { messagePresentation(it).kind == null }).sortedByDescending { it.ts }
+    var selectedConversation by rememberSaveable { mutableStateOf<String?>(null) }
     val filteredMessages = remember(messages, selectedMessagePairing) {
         MessageStore.filterByPairing(messages, selectedMessagePairing)
     }
+
+    val conversations = remember(filteredMessages) { textConversations(filteredMessages) }
+    val conversation = conversations.firstOrNull { it.key == selectedConversation }
+    val calls = filteredMessages.filter { messagePresentation(it).kind == AppState.CommunicationKind.CALL }
+    BackHandler(selectedConversation != null) { selectedConversation = null }
 
     LaunchedEffect(pairings, selectedMessagePairing) {
         if (selectedMessagePairing != null && pairings.none { it.code == selectedMessagePairing }) {
@@ -127,14 +137,28 @@ fun HomeScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    if (conversation != null && destination == HomeDestination.MESSAGES) {
+                        IconButton(onClick = { selectedConversation = null }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.conversation_back))
+                        }
+                    }
+                },
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (conversation != null && destination == HomeDestination.MESSAGES) {
+                        Column {
+                            Text(conversation.identity, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(conversation.code?.let { pairingNames[it] ?: "Pairing $it" }.orEmpty(),
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    } else Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         StatusDot(state = connState, size = 10.dp)
                         Text(
                             stringResource(
                                 when (destination) {
                                     HomeDestination.OVERVIEW -> R.string.home_title
                                     HomeDestination.MESSAGES -> R.string.home_messages_title
+                                    HomeDestination.CALLS -> R.string.home_calls_title
                                     HomeDestination.ACTIVITY -> R.string.home_activity_title
                                 }
                             )
@@ -142,7 +166,7 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    if (destination == HomeDestination.MESSAGES && messages.isNotEmpty()) {
+                    if ((destination == HomeDestination.MESSAGES || destination == HomeDestination.CALLS) && messages.isNotEmpty()) {
                         IconButton(onClick = { showClearHistoryConfirm = true }) {
                             Icon(
                                 Icons.Default.Delete,
@@ -248,12 +272,13 @@ fun HomeScreen(
                 HomeDestination.entries.forEach { item ->
                     NavigationBarItem(
                         selected = destination == item,
-                        onClick = { destination = item },
+                        onClick = { destination = item; selectedConversation = null },
                         icon = {
                             Icon(
                                 when (item) {
                                     HomeDestination.OVERVIEW -> Icons.Default.Home
                                     HomeDestination.MESSAGES -> Icons.Default.Notifications
+                                    HomeDestination.CALLS -> Icons.Default.Phone
                                     HomeDestination.ACTIVITY -> Icons.Default.Info
                                 },
                                 contentDescription = null,
@@ -265,6 +290,7 @@ fun HomeScreen(
                                     when (item) {
                                         HomeDestination.OVERVIEW -> R.string.home_nav_overview
                                         HomeDestination.MESSAGES -> R.string.home_nav_messages
+                                        HomeDestination.CALLS -> R.string.home_nav_calls
                                         HomeDestination.ACTIVITY -> R.string.home_nav_activity
                                     }
                                 )
@@ -275,8 +301,13 @@ fun HomeScreen(
             }
         },
     ) { innerPadding ->
-        key(destination) {
+        key(destination, selectedConversation) {
+        val historyListState = rememberLazyListState(
+            initialFirstVisibleItemIndex = if (conversation != null && destination == HomeDestination.MESSAGES)
+                conversation.entries.size + conversation.entries.map { historyDay(it.ts) }.distinct().size else 0,
+        )
         LazyColumn(
+            state = historyListState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding),
@@ -336,43 +367,37 @@ fun HomeScreen(
                         }
                     }
                 }
-                HomeDestination.MESSAGES -> {
-                    item {
-                        LogIntro(
-                            body = stringResource(R.string.home_messages_body),
-                        )
-                    }
-                    if (pairings.size > 1 && messages.isNotEmpty()) {
-                        item {
-                            MessagePairingFilters(
-                                pairings = pairings,
-                                selectedCode = selectedMessagePairing,
-                                onSelected = { selectedMessagePairing = it },
-                            )
-                        }
-                    }
-                    if (messages.isEmpty()) {
-                        item {
-                            EmptyLogState(
-                                icon = Icons.Default.Notifications,
-                                title = stringResource(R.string.home_messages_empty_title),
-                                body = stringResource(R.string.home_messages_empty_body),
-                            )
-                        }
-                    } else if (filteredMessages.isEmpty()) {
-                        item {
-                            EmptyLogState(
-                                icon = Icons.Default.Notifications,
-                                title = stringResource(R.string.home_messages_filter_empty_title),
-                                body = stringResource(R.string.home_messages_filter_empty_body),
-                            )
+                HomeDestination.MESSAGES, HomeDestination.CALLS -> {
+                    val isCalls = destination == HomeDestination.CALLS
+                    if (conversation != null && !isCalls) {
+                        item { LogIntro(stringResource(R.string.conversation_history_only)) }
+                        val chronological = conversation.entries.sortedBy { it.ts }
+                        chronological.forEachIndexed { index, entry ->
+                            val day = historyDay(entry.ts)
+                            if (index == 0 || historyDay(chronological[index - 1].ts) != day) {
+                                item { Text(day, modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+                                    textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            }
+                            item { ConversationBubble(entry) }
                         }
                     } else {
-                        items(
-                            filteredMessages,
-                            key = { "message-${it.ts}-${it.code}-${it.message.hashCode()}" },
-                        ) { entry ->
-                            MessageRow(entry, pairingNames)
+                        item { LogIntro(stringResource(if (isCalls) R.string.home_calls_body else R.string.home_messages_body)) }
+                        if (pairings.size > 1) {
+                            item { MessagePairingFilters(pairings, selectedMessagePairing) { selectedMessagePairing = it } }
+                        }
+                        if ((isCalls && calls.isEmpty()) || (!isCalls && conversations.isEmpty())) {
+                            item { EmptyLogState(
+                                icon = if (isCalls) Icons.Default.Phone else Icons.Default.Notifications,
+                                title = stringResource(if (isCalls) R.string.home_calls_empty_title else R.string.home_messages_empty_title),
+                                body = stringResource(if (isCalls) R.string.home_calls_empty_body else R.string.home_messages_empty_body),
+                            ) }
+                        } else if (isCalls) {
+                            items(calls.sortedByDescending { it.ts }) { MessageRow(it, pairingNames) }
+                        } else {
+                            items(conversations, key = { it.key }) { thread ->
+                                ConversationRow(thread, pairingNames) { selectedConversation = thread.key }
+                            }
                         }
                     }
                 }
@@ -419,6 +444,7 @@ fun HomeScreen(
                     onClick = {
                         AppState.clearMessages(context)
                         selectedMessagePairing = null
+                        selectedConversation = null
                         showClearHistoryConfirm = false
                     },
                 ) {
@@ -437,7 +463,7 @@ fun HomeScreen(
     }
 }
 
-private enum class HomeDestination { OVERVIEW, MESSAGES, ACTIVITY }
+private enum class HomeDestination { OVERVIEW, MESSAGES, CALLS, ACTIVITY }
 
 @Composable
 private fun MessagePairingFilters(

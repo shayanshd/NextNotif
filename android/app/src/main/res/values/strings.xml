@@ -82,7 +82,7 @@
     <string name="home_nav_overview">Overview</string>
     <string name="home_nav_messages">Messages</string>
     <string name="home_nav_activity">Activity</string>
-    <string name="home_messages_title">Messages &amp; calls</string>
+    <string name="home_messages_title">Messages</string>
     <string name="home_messages_clear">Clear history</string>
     <string name="home_messages_clear_confirm_title">Clear communication history?</string>
     <string name="home_messages_clear_confirm_body">This removes all saved texts, call updates, and relay tests from this phone only. Pairings and the activity log are not changed.</string>
@@ -101,12 +101,12 @@
     <string name="home_messages_call_update">Call state: %1$s</string>
     <string name="home_messages_pairing_unknown">Unknown pairing</string>
     <string name="home_activity_title">Activity log</string>
-    <string name="home_messages_heading">Messages &amp; calls</string>
-    <string name="home_messages_body">Texts and call updates shared between your paired phones.</string>
-    <string name="home_messages_empty_title">No messages or calls yet</string>
-    <string name="home_messages_empty_body">New texts and incoming calls will appear here, separate from connection diagnostics.</string>
+    <string name="home_messages_heading">Messages</string>
+    <string name="home_messages_body">Conversations from your paired phones, newest first.</string>
+    <string name="home_messages_empty_title">No conversations yet</string>
+    <string name="home_messages_empty_body">Texts from the same number appear together here.</string>
     <string name="home_activity_heading">Activity log</string>
-    <string name="home_activity_body">Connection changes, retries, queue delivery, and live-call diagnostics.</string>
+    <string name="home_activity_body">Relay tests, connection changes, retries, queue delivery, and live-call diagnostics.</string>
     <string name="home_activity_empty_title">No technical activity</string>
     <string name="home_activity_empty_body">Connection and delivery details will appear here when the relay runs.</string>
 
@@ -271,4 +271,12 @@
     <string name="call_close">Close</string>
     <string name="call_keep_open">Keep this screen open to see the live connection state.</string>
     <string name="ok">OK</string>
+    <string name="home_nav_calls">Calls</string>
+    <string name="home_calls_title">Call history</string>
+    <string name="home_calls_body">Call updates from your paired phones, newest first.</string>
+    <string name="home_calls_empty_title">No calls yet</string>
+    <string name="home_calls_empty_body">Call updates for the selected pairings will appear here.</string>
+    <string name="conversation_back">Back to conversations</string>
+    <string name="conversation_history_only">Forwarded text history</string>
+    <plurals name="conversation_count"><item quantity="one">%d message</item><item quantity="other">%d messages</item></plurals>
 </resources>
