@@ -99,6 +99,8 @@ class RelayForegroundService : Service() {
     @Volatile private var callPeerSession: String? = null
     @Volatile private var callPeerReadySession: String? = null
     @Volatile private var stoppingCallBridge: WebRtcCallAudioBridge? = null
+    private var iceLoadingSession: String? = null
+    private val pendingWebRtcSignals = mutableListOf<JSONObject>()
     private val temporaryCallSockets = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val callTimeouts = LiveCallTimeoutPolicy()
     private val callMetrics = java.util.Collections.synchronizedMap(
@@ -928,6 +930,12 @@ class RelayForegroundService : Service() {
             if (activeCallCode != code) return
             val remote = if (pairing.role == Role.SENDER) Role.RECEIVER else Role.SENDER
             if (WebRtcSignal.parse(data, session, remote) == null) return
+            if (callPeerReadySession != session) {
+                if (pendingWebRtcSignals.size >= 128) {
+                    completeLiveCall(code, "signaling_overflow", "Too many pending call signals")
+                } else pendingWebRtcSignals.add(JSONObject(data.toString()))
+                return
+            }
             if (callAudioBridge?.receive(data, remote) != true) {
                 completeLiveCall(code, "signaling_not_ready", "Call audio was not ready for negotiation")
             }
@@ -984,7 +992,6 @@ class RelayForegroundService : Service() {
                 pendingAnswerCode = null
                 answerRetryJobs.remove(code)?.cancel()
                 if (callPeerSession == session) return
-                reconnectTimeoutJobs.remove(code)?.cancel()
                 retireCallPeer()
                 callPeerSession = session
                 AppState.updateCall(code, AppState.CallPhase.CONNECTING)
@@ -992,7 +999,6 @@ class RelayForegroundService : Service() {
             }
             "resume" -> if (pairing.role == Role.SENDER && lastCallState == TelephonyManager.CALL_STATE_OFFHOOK) {
                 activeCallCode = code
-                reconnectTimeoutJobs.remove(code)?.cancel()
                 retireCallPeer()
                 startCallBridge(pairing)
             }
@@ -1056,7 +1062,7 @@ class RelayForegroundService : Service() {
     }
 
     @Synchronized
-    private fun startCallBridge(pairing: PairingInfo) {
+    private fun startCallBridge(pairing: PairingInfo, provisionedIce: List<org.webrtc.PeerConnection.IceServer>? = null) {
         if (callAudioBridge != null || activeCallCode != pairing.code) return
         if (pairing.role == Role.SENDER) {
             liveCallDenial(pairing)?.let { message ->
@@ -1084,7 +1090,42 @@ class RelayForegroundService : Service() {
                 }
                 synchronized(this@RelayForegroundService) {
                     if (stoppingCallBridge === previous) stoppingCallBridge = null
-                    if (callPeerSession == session && activeCallCode == pairing.code) startCallBridge(pairing)
+                    if (callPeerSession == session && activeCallCode == pairing.code) startCallBridge(pairing, provisionedIce)
+                }
+            }
+            return
+        }
+        if (provisionedIce == null) {
+            if (iceLoadingSession == session) return
+            iceLoadingSession = session
+            // Includes credential fetching. Peer replacement never resets this deadline.
+            if (!reconnectTimeoutJobs.containsKey(pairing.code)) reconnectTimeoutJobs[pairing.code] = scope.launch {
+                delay(callTimeouts.rendezvousMs)
+                synchronized(this@RelayForegroundService) {
+                    if (activeCallCode == pairing.code) completeLiveCall(pairing.code,
+                        "negotiation_timeout", "Could not connect WebRTC call audio")
+                }
+            }
+            promoteCallForeground()
+            AppState.updateCall(pairing.code, AppState.CallPhase.CONNECTING, "Preparing secure call audio")
+            scope.launch {
+                val result = runCatching {
+                    val current = SessionStore.load(this@RelayForegroundService).pairings.first {
+                        it.code == pairing.code && it.role == pairing.role && it.enabled
+                    }
+                    WebRtcIceClient.fetch(current)
+                }
+                synchronized(this@RelayForegroundService) {
+                    if (callPeerSession != session || activeCallCode != pairing.code || iceLoadingSession != session) return@synchronized
+                    iceLoadingSession = null
+                    result.fold(
+                        onSuccess = { startCallBridge(pairing, it) },
+                        onFailure = {
+                            sockets[pairing.code]?.send("call_control", JSONObject().put("action", "error")
+                                .put("session_id", session).put("message", "Could not prepare TURN call audio"))
+                            completeLiveCall(pairing.code, "turn_unavailable", "Could not prepare TURN call audio")
+                        },
+                    )
                 }
             }
             return
@@ -1094,14 +1135,24 @@ class RelayForegroundService : Service() {
             role = pairing.role,
             sessionId = session,
             capability = if (pairing.role == Role.SENDER) gatewayCapability.get() else GatewayCapability.ROOT_UNAVAILABLE,
-            // Host candidates support the initial LAN experiment. Authenticated
-            // STUN/TURN provisioning is still required before public release.
-            iceServers = emptyList(),
+            iceServers = provisionedIce,
             sendSignal = { signal -> synchronized(this@RelayForegroundService) {
                 callPeerSession == session && activeCallCode == pairing.code &&
                     sockets[pairing.code]?.send("call_control", signal.put("action", "webrtc_signal")) == true
             } },
             onReady = { synchronized(this@RelayForegroundService) {
+                if (callPeerSession == session && activeCallCode == pairing.code) {
+                    callPeerReadySession = session
+                    val remote = if (pairing.role == Role.SENDER) Role.RECEIVER else Role.SENDER
+                    val queued = pendingWebRtcSignals.toList()
+                    pendingWebRtcSignals.clear()
+                    for (signal in queued) {
+                        if (callAudioBridge?.receive(signal, remote) != true) {
+                            completeLiveCall(pairing.code, "signaling_not_ready", "Could not negotiate call audio")
+                            break
+                        }
+                    }
+                }
                 if (callPeerSession == session && activeCallCode == pairing.code && pairing.role == Role.SENDER) {
                     callPeerReadySession = session
                     if (sockets[pairing.code]?.send("call_control", JSONObject().put("action", "connected")
@@ -1149,7 +1200,9 @@ class RelayForegroundService : Service() {
             if (!reconnectTimeoutJobs.containsKey(pairing.code)) reconnectTimeoutJobs[pairing.code] = scope.launch {
                 delay(callTimeouts.rendezvousMs)
                 synchronized(this@RelayForegroundService) {
-                    if (callPeerSession == session) completeLiveCall(pairing.code,
+                    // The deadline belongs to the call attempt, not a peer.
+                    // Replacing a failed peer must not disable or reset it.
+                    if (activeCallCode == pairing.code) completeLiveCall(pairing.code,
                         "negotiation_timeout", "Could not connect WebRTC call audio")
                 }
             }
@@ -1267,6 +1320,8 @@ class RelayForegroundService : Service() {
 
     @Synchronized
     private fun retireCallPeer() {
+        iceLoadingSession = null
+        pendingWebRtcSignals.clear()
         callPeerSession = null
         callPeerReadySession = null
         val bridge = callAudioBridge

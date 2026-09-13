@@ -2,6 +2,106 @@
 
 ## Current installed checkpoint (supersedes historical pending notes)
 
+2026-09-13 TURN implementation checkpoint (supersedes all older pending-TURN notes):
+Cloudflare TURN key ID and issuance token provisioned as encrypted Worker secrets;
+FCM_SERVICE_ACCOUNT preserved. Production Worker version
+5a1c3e2a-82c7-42e4-b754-859ae774012b exposes authenticated POST /ice (existing
+pairing/device credential required, no bootstrap, durable 16/min/pair limit,
+no-store response, bounded provider request/JSON, sanitized errors).
+Provider keys never enter the APK or credential response. Credentials last 14,700s,
+covering the existing four-hour call cap plus setup grace. Existing relay custom
+domain is now explicit in wrangler.amber.jsonc; preserve SQLite migration v1.
+
+Both USB phones passed NativeWebRtcTwoPhoneInstrumentedTest with probeIce=production,
+forced relay, audio disabled, localhost/ADB signaling only. Samsung default network
+was validated Wi-Fi; Xiaomi default was validated cellular. Both native peers held
+CONNECTED for two seconds and disposed successfully (Samsung 5.615s, Xiaomi 9.47s).
+Aggregate candidates: sender 5, receiver 4, all udp_relay_v4_public; queues drained.
+This validates network transport, NOT RTP speech, call-answer signaling, quality,
+long calls, provider failover, or handover. No raw audio collected or cellular call made.
+
+Actual call path now fetches authenticated TURN on IO before bridge startup, buffers
+up to 128 validated early session signals until audio is ready, discards stale fetch
+results after peer retirement, and includes fetch in the fixed rendezvous deadline.
+Debug unit tests, assembleDebug, assembleDebugAndroidTest and lintDebug passed;
+16 backend Node tests and 3 Python probe tests passed. Latest real-call APK installed
+on Samsung 52006a98f0ac6489 and Xiaomi 53d75ef with app/pairing data preserved.
+Test-only adb reverse tcp:8769 mappings removed. Next: owner-initiated live call
+with Xiaomi on cellular and Samsung Wi-Fi; verify two-way RTP/audible speech.
+
+Metered fallback is NOT wired into /ice yet. Its existing fetch-only API key returns
+static transport credentials. Official docs require management secret + ahead-of-time
+rotation for expiring credentials (propagation can take two minutes); do not create
+brand-new Metered credentials on the critical call-setup path. Cloudflare remains
+the only enabled TURN provider; fallback and quota-safe rotation still open.
+Original FCM private-key backup deferred by owner. Owner requested committing and
+pushing this checkpoint to dev; live-call speech validation remains pending.
+
+GitHub rotation confirmation 2026-09-13: owner completed authentication; current
+browser reports Secret updated and gh secret list confirms METERED_TURN_API_KEY
+updated at 17:51:09Z (replaces revoked key's 17:42:44Z timestamp). Rotation storage
+is complete; the earlier pending-auth notes below are historical. Saved secret names
+also include CLOUDFLARE_TURN_KEY_ID, CLOUDFLARE_TURN_API_TOKEN,
+METERED_TURN_DOMAIN and GOOGLE_SERVICES_JSON. FCM_SERVICE_ACCOUNT backup still
+unconfirmed/missing. No Worker deployment or TURN two-phone test has run yet.
+
+Rotation/audit follow-up 2026-09-13: owner approved revoking the exposed Metered
+credential and backing up project credentials to GitHub. Removed only generated
+nextnotif-fallback credential after explicit confirmation; created nextnotif-fallback-v2.
+Replacement API key retained privately in browser session, not printed/exported.
+IMPORTANT: GitHub update is NOT complete. Browser form triggers Confirm access
+passkey/email owner re-authentication; gh secret list still reports the original
+METERED_TURN_API_KEY timestamp 17:42:44Z. That GitHub value refers to the revoked
+credential and must not be deployed/used until replaced. Owner must complete the
+GitHub confirmation prompt. GOOGLE_SERVICES_JSON successfully added via gh CLI at
+17:49Z; this is Firebase public client/build configuration, not an admin private key.
+Local checkout, project/Downloads and project-specific temporary filename scans
+found no original FCM service-account private-key file or production signing key.
+Existing Cloudflare-stored FCM_SERVICE_ACCOUNT cannot be treated as backed up on
+GitHub without its original value. Personal GitHub/Wrangler OAuth and phone pairing
+tokens are not project deployment secrets; do not upload those. Local copies preserved.
+
+Credential checkpoint 2026-09-13: owner activated Cloudflare Realtime personally and
+authorized creating dedicated Cloudflare/Metered credentials and storing them on
+GitHub. Cloudflare TURN app nextnotif-relay created successfully (the interrupted
+creation had succeeded; no duplicate created). Encrypted Actions repository secrets
+on shayanshd/NextNotif: CLOUDFLARE_TURN_KEY_ID, CLOUDFLARE_TURN_API_TOKEN,
+METERED_TURN_API_KEY, METERED_TURN_DOMAIN. No secret values written to Git files or
+APK. Existing CI does not consume these credentials, so storage alone does not
+configure the deployed Worker or actual calls. Metered credential nextnotif-fallback
+created on existing TURN TRIAL GLOBAL 500MB plan; payments/plan unchanged.
+SECURITY: Metered per-credential API key appeared in diagnostic tool output because
+the page embedded it in a code comment missed by filtering. Must revoke/remove
+this test credential and replace it, then update METERED_TURN_API_KEY before use.
+User confirmation required before irreversibly removing it through browser UI.
+Do not log/export raw credential page content. No TURN connectivity test has run.
+
+Cloudflare TURN eligibility checked in authenticated dashboard 2026-09-13, following
+owner request to test Cloudflare's free allowance first. Account is not subscribed
+to Realtime: TURN redirects to realtime-subscribe/turn. Activation checkout confirms
+1,000 GB/month included and $0.05/additional GB, but requires an automatically renewing
+Realtime subscription billed to the payment method on file and acceptance of terms.
+Stopped before Add Realtime subscription: no subscription, TURN key, credentials,
+deployment or new device test created. Owner previously declined billed service;
+free allowance is not a hard no-billing cap. Dashboard left available for owner
+decision. Existing Wrangler OAuth scopes do not include Calls Read/Write.
+
+Latest isolated test 2026-09-13: Samsung Wi-Fi / Xiaomi validated LTE, USB serials
+unchanged. NativeWebRtcTwoPhoneInstrumentedTest with recording/playout disabled and
+ephemeral localhost signaling exchanged offer/answer and all candidates, but failed
+on both peers. Host-only: Samsung one private IPv4 host candidate; Xiaomi IPv4/IPv6
+host candidates. STUN comparison: public srflx candidates gathered by both peers,
+still WebRTC connection failed. No cellular call, raw audio, pairing or permission
+changes were needed. Thus TURN is the next connectivity test, not more root/audio
+experiments. Public STUN discovery added to actual call configuration; bounded media
+deadline now survives replacement peers and connected/resume signaling. Full network
+fix pending TURN credentials and approval for any billed service. Final shared ICE
+configuration and deadline patch passed testDebugUnitTest, assembleDebug,
+assembleDebugAndroidTest and lintDebug. Both phones received the final app/test APKs
+with data-preserving install -r and normal MainActivity startup restored. Only this
+test's signaling processes and tcp:8769 USB reverses were removed. Actual cellular
+timeout behavior is not physically verified. Changes remain uncommitted on dev.
+
 Latest handoff 2026-09-13: user requested commit/push on dev. LAN two-way speech
 and in-app Answer have owner confirmation. Sender's missing liveCallEnabled was
 re-enabled by the owner, now verified true with gateway AVAILABLE. Compatible

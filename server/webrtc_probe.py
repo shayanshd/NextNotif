@@ -1,11 +1,16 @@
 """Local-only, ephemeral signaling fixture for the opt-in no-audio phone probe.
 
-No production pairing, credentials, call data, audio, files, or durable queues.
+No production pairing writes, call data, audio, files, or durable queues.
+Optional provider configuration holds keys/transport credentials in memory only.
+The production-mode Android probe fetches ICE directly from its authenticated relay;
+this fixture then carries only ephemeral signaling and aggregate diagnostics.
 """
 import argparse
 import ipaddress
 import json
 import threading
+import urllib.request
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -30,12 +35,13 @@ def candidate_bucket(candidate):
     return f"{protocol}_{kind}_{family}_{scope}"
 
 
-def serve(session, port):
+def serve(session, port, provider=None):
     lock = threading.Lock()
     queues = {"sender": [], "receiver": []}
     ready, connected, verified = set(), set(), set()
     metrics = {role: {"offer": 0, "answer": 0, "ice": 0, "consumed": 0, "candidate_types": {}}
                for role in queues}
+    ice_servers = {}
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -54,6 +60,53 @@ def serve(session, port):
             self.wfile.write(body)
 
         def dispatch(self, post):
+            if self.path == "/configure" and provider:
+                origin = f"http://127.0.0.1:{port}"
+                if self.headers.get("Host") != f"127.0.0.1:{port}":
+                    return self.reply(403, {"error": "invalid host"})
+                if not post:
+                    body = (f'<form method="post"><input type="hidden" name="session" value="{session}">'
+                            '<label>Cloudflare ID<input name="id" autocomplete="off"></label>'
+                            '<label>Cloudflare token<input type="password" name="token" autocomplete="off"></label>'
+                            '<label>Metered key<input type="password" name="metered" autocomplete="off"></label>'
+                            '<button>Configure ephemeral test</button></form>').encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers(); self.wfile.write(body)
+                    return
+                if self.headers.get("Origin") != origin:
+                    return self.reply(403, {"error": "invalid origin"})
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 8192 or ice_servers:
+                        raise ValueError()
+                    values = urllib.parse.parse_qs(self.rfile.read(size).decode())
+                    if values.get("session") != [session]:
+                        raise ValueError()
+                    for target_role in queues:
+                        if provider == "cloudflare":
+                            key_id = values["id"][0]
+                            if len(key_id) != 32 or not key_id.isalnum():
+                                raise ValueError()
+                            req = urllib.request.Request(
+                                f"https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate-ice-servers",
+                                data=json.dumps({"ttl": 600}).encode(),
+                                headers={"Authorization": "Bearer " + values["token"][0], "Content-Type": "application/json"})
+                        else:
+                            key = urllib.parse.quote(values["metered"][0], safe="")
+                            req = urllib.request.Request(f"https://nextnotif-relay.metered.live/api/v1/turn/credentials?apiKey={key}")
+                        with urllib.request.urlopen(req, timeout=10) as response:
+                            result = json.loads(response.read(65536))
+                        servers = result["iceServers"] if isinstance(result, dict) else result
+                        if not isinstance(servers, list) or not 1 <= len(servers) <= 8:
+                            raise ValueError()
+                        ice_servers[target_role] = servers
+                except Exception:
+                    ice_servers.clear()
+                    return self.reply(502, {"error": "provider configuration failed"})
+                return self.reply(200, {"configured": True, "provider": provider})
             role = self.headers.get("X-Probe-Role")
             if role not in queues or self.headers.get("X-Probe-Session") != session:
                 return self.reply(403, {"error": "invalid probe"})
@@ -74,7 +127,9 @@ def serve(session, port):
                 except (ValueError, TypeError):
                     return self.reply(400, {"error": "invalid signal"})
             with lock:
-                if self.path == "/ready":
+                if self.path == "/ice-servers" and not post:
+                    result = {"iceServers": ice_servers.get(role, [])}
+                elif self.path == "/ready":
                     if post:
                         ready.add(role)
                     result = {"sender": "sender" in ready, "both": len(ready) == 2}
@@ -133,5 +188,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", required=True)
     parser.add_argument("--port", type=int, default=8769)
+    parser.add_argument("--provider", choices=["cloudflare", "metered"])
     args = parser.parse_args()
-    serve(args.session, args.port)
+    serve(args.session, args.port, args.provider)

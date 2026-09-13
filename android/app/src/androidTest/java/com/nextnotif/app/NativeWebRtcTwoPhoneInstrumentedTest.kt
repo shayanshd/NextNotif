@@ -39,9 +39,32 @@ class NativeWebRtcTwoPhoneInstrumentedTest {
         val errors = CopyOnWriteArrayList<String>()
         val connected = AtomicBoolean(false)
         val stats = AtomicBoolean(false)
+        val iceServers = when (args.getString("probeIce", "host")) {
+            "host" -> emptyList()
+            "stun" -> WebRtcIceConfiguration.discoveryServers()
+            "production" -> {
+                val context = InstrumentationRegistry.getInstrumentation().targetContext
+                val pairing = SessionStore.load(context).pairings.first { it.enabled && it.role == role }
+                WebRtcIceClient.fetch(pairing)
+            }
+            "turn" -> {
+                val array = request("/ice-servers").getJSONArray("iceServers")
+                check(array.length() in 1..8) { "TURN fixture is not configured" }
+                (0 until array.length()).map { index ->
+                    val server = array.getJSONObject(index)
+                    val raw = server.get("urls")
+                    val urls = if (raw is org.json.JSONArray) (0 until raw.length()).map { raw.getString(it) } else listOf(raw as String)
+                    val builder = PeerConnection.IceServer.builder(urls)
+                    if (server.has("username")) builder.setUsername(server.getString("username"))
+                    if (server.has("credential")) builder.setPassword(server.getString("credential"))
+                    builder.createIceServer()
+                }
+            }
+            else -> error("Unsupported probe ICE mode")
+        }
         val peer = WebRtcCallPeer(InstrumentationRegistry.getInstrumentation().targetContext,
             role, session, if (role == Role.SENDER) GatewayCapability.AVAILABLE else GatewayCapability.ROOT_UNAVAILABLE,
-            emptyList(), audioEnabled = false,
+            iceServers, forceRelay = args.getString("probeIce") in listOf("turn", "production"), audioEnabled = false,
             sendSignal = { try { request("/signals", it); true } catch (_: Exception) { false } },
             onState = { connected.set(it == PeerConnection.PeerConnectionState.CONNECTED) },
             onError = { errors.add(it) })

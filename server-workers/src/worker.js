@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { cloudflareIceServers, consumeIceBudget } from './turn-credentials.mjs';
 import { SecurePairingStore } from './secure-pairing-store.mjs';
 import { authorizeSecure, AuthorizationError } from './secure-pairing.mjs';
 
@@ -59,7 +60,8 @@ async function forwardSend(env, request, code) {
 async function forwardReceiverHttp(env, request, code, operation) {
   const url = new URL(request.url);
   url.pathname = `/${operation}/${code}`;
-  const body = await request.text();
+  // ICE requests carry no body: never buffer arbitrary unauthenticated input.
+  const body = operation === 'ice' ? '' : await request.text();
   const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
   return inst.fetch(new Request(url, { method: 'POST', headers: request.headers, body }));
 }
@@ -454,12 +456,34 @@ export class RelayPairing extends DurableObject {
         // Secure WS support follows HTTP guards. Until then deny before slot
         // replacement, pending metadata, or legacy token minting can occur.
         if (await this.securityMode() !== 'legacy') throw new AuthorizationError();
-      } else if (operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status'].includes(operation)) {
-        secure = await this.authorizeHttp(request, operation === 'send' ? 'sender' : operation === 'status' ? null : 'receiver');
+      } else if (operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
+        secure = await this.authorizeHttp(request, operation === 'send' ? 'sender' : ['status', 'ice'].includes(operation) ? null : 'receiver');
       }
     } catch (error) {
       if (!(error instanceof AuthorizationError)) throw error;
       return Response.json({ error: 'pairing authorization failed' }, { status: 401 });
+    }
+
+    if (operation === 'ice' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
+      const headers = { 'Cache-Control': 'no-store' };
+      if (await this.state.storage.get('paired') == null) {
+        return Response.json({ error: 'unknown pairing' }, { status: 404, headers });
+      }
+      const auth = request.headers.get('Authorization') || '';
+      const token = request.headers.get('X-NextNotif-Token') || (auth.startsWith('Bearer ') ? auth.slice(7) : '');
+      if (!secure && (!token || !(await this.getTokens()).includes(token))) {
+        return Response.json({ error: 'unknown device token' }, { status: 401, headers });
+      }
+      if (!await consumeIceBudget(this.state.storage)) {
+        return Response.json({ error: 'TURN request rate exceeded' }, { status: 429,
+          headers: { ...headers, 'Retry-After': '60' } });
+      }
+      try {
+        return Response.json(await cloudflareIceServers(this.env), { headers });
+      } catch {
+        // Never emit provider bodies, credential URLs, or keys in logs/errors.
+        return Response.json({ error: 'TURN credentials unavailable' }, { status: 503, headers });
+      }
     }
 
     if (operation === 'status' && parts.length === 2 && isValidCode(parts[1])) {
@@ -846,7 +870,7 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 1 &&
-      ['fcm-register', 'drain', 'fetch', 'ack'].includes(parts[0])
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice'].includes(parts[0])
     ) {
       if (!isValidCode(headerCode)) {
         return Response.json({ error: 'missing pairing code' }, { status: 400 });
@@ -857,7 +881,7 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 2 &&
-      ['fcm-register', 'drain', 'fetch', 'ack'].includes(parts[0])
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice'].includes(parts[0])
     ) {
       const code = isValidCode(headerCode) ? headerCode : parts[1];
       if (!isValidCode(code)) return new Response('Not found', { status: 404 });

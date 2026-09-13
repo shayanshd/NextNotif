@@ -11,6 +11,38 @@ Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
 ## MVP execution roadmap (resumed 2026-09-12)
 
+Latest checkpoint 2026-09-13 (overrides historical TURN pending/billing notes below):
+
+- [x] Owner activated Cloudflare; keys stored in GitHub and encrypted Worker secrets.
+- [x] Authenticated, rate-limited temporary Cloudflare TURN credential endpoint deployed.
+- [x] Forced-TURN no-audio two-phone test passes across Samsung Wi-Fi / Xiaomi cellular.
+- [x] Actual call path provisions TURN on IO, buffers early session signals and bounds setup.
+- [x] Build/unit/lint checks pass; latest call build installed on both phones, data preserved.
+- [ ] Owner live cellular call: two-way speech/RTP, volume, latency and sustained quality.
+- [ ] Metered expiring-credential rotation and tested fallback (not yet enabled).
+- [ ] Longer-call, interruption and network handover coverage; remaining MVP/release gates.
+
+Transport probe success is not live-call or MVP completion. FCM remains idle wake-and-drain;
+WebSocket remains active-call signaling only; actual call media remains WebRTC/Opus.
+
+Cloudflare free-tier check 2026-09-13: authenticated dashboard confirms 1,000 GB/month
+included, but account activation requires an auto-renewing usage-billed Realtime
+subscription. No subscription was activated under the owner's no-paid-billing
+constraint, and no TURN connectivity test ran. Next: owner chooses activation with
+overage risk or another provider's genuinely suitable free plan; verify billing and
+limits before provisioning keys. Do not bypass account activation via the API.
+
+2026-09-13 isolated USB-signaled, audio-disabled Wi-Fi/LTE comparison:
+host-only ICE failed on both peers despite exchanged offer/answer/candidates.
+STUN comparison gathered public srflx candidates on both peers but also failed;
+this reproduces the network/media failure without any cellular call or audio capture.
+Implemented public STUN discovery in the real call path and preserved the existing
+setup/reconnect timeout across replacement peers (previously it checked an obsolete
+session or was cancelled on each connected/resume control message).
+STUN is NOT the full fix: provision authenticated short-lived TURN, with owner approval
+for any billed service, then repeat no-audio relay connectivity before a cellular call.
+Do not label mobile-data calling fixed or the deadline physically verified yet.
+
 2026-09-13 latest call checkpoint: LAN speech both ways and in-app Answer confirmed.
 On mobile data, durable wss:// settings now permit receiver signaling and Samsung
 Answer, but media never connects (no STUN/TURN configured). Repeated media recreation

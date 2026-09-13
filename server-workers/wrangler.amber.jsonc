@@ -3,6 +3,7 @@
   "name": "nextnotif-relay",
   "main": "src/worker.js",
   "compatibility_date": "2025-06-01",
+  "routes": [{ "pattern": "relay.amberdogeorgia.com", "custom_domain": true }],
   "services": [],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RelayPairing"] }
