@@ -33,7 +33,10 @@ object IncomingNotifier {
         actionLabel: String? = null,
         actionIntent: Intent? = null,
         actionOpensActivity: Boolean = false,
+        callScreenIntent: Intent? = null,
+        ringing: Boolean = false,
     ) {
+        Notifications.ensureChannels(ctx)
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -43,17 +46,26 @@ object IncomingNotifier {
         }
         val pi = PendingIntent.getActivity(
             ctx, id,
-            Intent(ctx, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE,
+            callScreenIntent ?: Intent(ctx, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val builder = NotificationCompat.Builder(ctx, Notifications.CHANNEL_INCOMING)
+        val builder = NotificationCompat.Builder(ctx,
+            if (ringing) Notifications.CHANNEL_CALLS else Notifications.CHANNEL_INCOMING)
             .setSmallIcon(R.drawable.ic_stat_relay)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setAutoCancel(true)
+            .setAutoCancel(!ringing)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(pi)
+        if (ringing) {
+            builder.setCategory(NotificationCompat.CATEGORY_CALL)
+                .setOngoing(true)
+                .setTimeoutAfter(90_000L)
+            if (Build.VERSION.SDK_INT < 34 || nm.canUseFullScreenIntent()) {
+                builder.setFullScreenIntent(pi, true)
+            }
+        }
         if (actionLabel != null && actionIntent != null) {
             val actionPi = if (actionOpensActivity) {
                 PendingIntent.getActivity(
@@ -96,6 +108,7 @@ object IncomingNotifier {
         name: String? = null,
         code: String? = null,
         liveCallAvailable: Boolean = false,
+        offeredAt: Long? = null,
     ) {
         val label = when {
             name != null && number != "unknown" -> "$name ($number)"
@@ -118,6 +131,7 @@ object IncomingNotifier {
                 number,
                 name,
                 answer = true,
+                offeredAt = offeredAt,
             )
             CallNotificationAction.HANG_UP -> Intent(ctx, RelayForegroundService::class.java)
                 .setAction(RelayForegroundService.ACTION_END_RELAY_CALL)
@@ -133,10 +147,16 @@ object IncomingNotifier {
             ctx,
             title,
             detail,
-            1100 + (number.hashCode() and 0xFF),
+            // Caller metadata can change or disappear on OFFHOOK/IDLE. Replace
+            // the same pairing's ringing notification rather than leaving it behind.
+            1100 + ((code ?: number).hashCode() and 0xFFFF),
             actionLabel,
             action,
             actionOpensActivity = actionKind == CallNotificationAction.ANSWER,
+            callScreenIntent = if (actionKind != null) RelayCallActivity.createIntent(
+                ctx, requireNotNull(code), number, name, answer = false, offeredAt = offeredAt,
+            ) else null,
+            ringing = actionKind == CallNotificationAction.ANSWER,
         )
     }
 }

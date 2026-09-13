@@ -37,6 +37,7 @@ object AppState {
         val phase: CallPhase = CallPhase.IDLE,
         val connectedAt: Long? = null,
         val detail: String? = null,
+        val offeredAt: Long? = null,
     ) {
         val callerLabel: String
             get() = name?.takeIf { it.isNotBlank() }
@@ -174,15 +175,29 @@ object AppState {
         _messages.value = emptyList()
     }
 
-    fun setIncomingCall(code: String, number: String?, name: String?) {
+    @Synchronized
+    fun setIncomingCall(code: String, number: String?, name: String?, offeredAt: Long? = null) {
+        if (_callRelay.value.phase in setOf(CallPhase.ANSWERING, CallPhase.CONNECTING,
+                CallPhase.ACTIVE, CallPhase.RECONNECTING)) return
         _callRelay.value = CallRelayState(
             code = code,
             number = number,
             name = name,
             phase = CallPhase.RINGING,
+            offeredAt = offeredAt,
         )
     }
 
+    @Synchronized
+    fun observeIncomingCall(code: String, state: String, liveAvailable: Boolean,
+                            number: String?, name: String?, offeredAt: Long? = null) {
+        if (state == "RINGING" && liveAvailable) setIncomingCall(code, number, name, offeredAt)
+        // A passive alert may dismiss an unanswered call, but cannot own teardown
+        // of active media. The service handles active-session end controls.
+        if (state == "IDLE" && _callRelay.value.phase == CallPhase.RINGING) finishCall(code)
+    }
+
+    @Synchronized
     fun updateCall(
         code: String,
         phase: CallPhase,
@@ -206,6 +221,7 @@ object AppState {
         ).let { if (sameCall) it else it.copy(connectedAt = if (phase == CallPhase.ACTIVE) System.currentTimeMillis() else null) }
     }
 
+    @Synchronized
     fun finishCall(code: String, failed: String? = null) {
         val current = _callRelay.value
         if (current.code != code) return

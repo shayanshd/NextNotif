@@ -2,7 +2,13 @@ package com.nextnotif.app
 
 import android.content.Context
 import android.content.Intent
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -42,11 +49,52 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
 class RelayCallActivity : ComponentActivity() {
+    private var pendingAnswerCode by mutableStateOf<String?>(null)
+    private var microphoneDenied by mutableStateOf(false)
+    private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val code = pendingAnswerCode
+        pendingAnswerCode = null
+        microphoneDenied = !granted
+        if (granted && code != null) requestAnswer(code)
+    }
+
+    private fun requestAnswer(code: String) {
+        val call = AppState.callRelay.value
+        val pairing = SessionStore.load(this).pairings.firstOrNull { it.code == code } ?: return
+        if (pairing.role != Role.RECEIVER || !pairing.enabled ||
+            !(pairing.isWs || pairing.isFcmOnDemand) ||
+            !RelayCallUiPolicy.canRequestAnswer(call.phase, call.code, code)) return
+        val offeredAt = if (call.code == code) call.offeredAt
+            else intent.getLongExtra(EXTRA_OFFERED_AT, 0L).takeIf { it > 0L }
+        if (!CallEventFreshness.permitsInteraction(offeredAt, System.currentTimeMillis())) {
+            if (call.code == code) AppState.finishCall(code, getString(R.string.call_offer_expired))
+            AppState.setError(getString(R.string.call_offer_expired))
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            if (pendingAnswerCode != null) return
+            pendingAnswerCode = code
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        microphoneDenied = false
+        RelayForegroundService.Controller.answerCall(this, code,
+            call.number ?: intent.getStringExtra(EXTRA_NUMBER),
+            call.name ?: intent.getStringExtra(EXTRA_NAME), offeredAt)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pending_microphone_answer", pendingAnswerCode)
+        outState.putBoolean("microphone_denied", microphoneDenied)
+        super.onSaveInstanceState(outState)
+    }
+
     companion object {
         private const val EXTRA_CODE = "code"
         private const val EXTRA_NUMBER = "number"
         private const val EXTRA_NAME = "name"
         private const val EXTRA_ANSWER = "answer"
+        private const val EXTRA_OFFERED_AT = "offered_at"
 
         fun createIntent(
             context: Context,
@@ -54,26 +102,30 @@ class RelayCallActivity : ComponentActivity() {
             number: String?,
             name: String?,
             answer: Boolean,
+            offeredAt: Long? = null,
         ) = Intent(context, RelayCallActivity::class.java).apply {
             putExtra(EXTRA_CODE, code)
             putExtra(EXTRA_NUMBER, number)
             putExtra(EXTRA_NAME, name)
             putExtra(EXTRA_ANSWER, answer)
+            offeredAt?.let { putExtra(EXTRA_OFFERED_AT, it) }
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        IncomingCallOfferStore.restore(this)
+        pendingAnswerCode = savedInstanceState?.getString("pending_microphone_answer")
+        microphoneDenied = savedInstanceState?.getBoolean("microphone_denied") ?: false
         val code = intent.getStringExtra(EXTRA_CODE) ?: run {
             finish()
             return
         }
-        val number = intent.getStringExtra(EXTRA_NUMBER)
-        val name = intent.getStringExtra(EXTRA_NAME)
-        if (AppState.callRelay.value.code != code) AppState.setIncomingCall(code, number, name)
+        // Opening a notification is not evidence of a new incoming call. Keep the
+        // current live identity; only explicit Answer may recover an idle process.
         if (savedInstanceState == null && intent.getBooleanExtra(EXTRA_ANSWER, false)) {
-            RelayForegroundService.Controller.answerCall(this, code, number, name)
+            requestAnswer(code)
         }
 
         enableEdgeToEdge()
@@ -82,12 +134,15 @@ class RelayCallActivity : ComponentActivity() {
                 val call by AppState.callRelay.collectAsState()
                 RelayCallScreen(
                     call = call,
-                    canAnswer = SessionStore.load(this).pairings.firstOrNull { it.code == call.code }?.let {
+                    canAnswer = pendingAnswerCode == null && SessionStore.load(this).pairings.firstOrNull { it.code == call.code }?.let {
                         RelayCallUiPolicy.canAnswer(call.phase, it.role, it.enabled)
                     } == true,
                     onAnswer = { call.code?.let { current ->
-                        RelayForegroundService.Controller.answerCall(this, current, call.number, call.name)
+                        requestAnswer(current)
                     } },
+                    microphoneDenied = microphoneDenied,
+                    onOpenSettings = { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName"))) },
                     onHangUp = { call.code?.let { RelayForegroundService.Controller.endCall(this, it) } },
                     onClose = { finish() },
                 )
@@ -100,13 +155,11 @@ class RelayCallActivity : ComponentActivity() {
         setIntent(intent)
         if (intent.getBooleanExtra(EXTRA_ANSWER, false)) {
             intent.getStringExtra(EXTRA_CODE)?.let { code ->
-                RelayForegroundService.Controller.answerCall(this, code,
-                    intent.getStringExtra(EXTRA_NUMBER), intent.getStringExtra(EXTRA_NAME))
+                requestAnswer(code)
             }
         }
-        // Refresh displayed identity even when Android reuses this activity.
-        // The explicit answer above is not replayed on recreation.
-        recreate()
+        // Compose observes current call state directly; do not recreate and lose
+        // a microphone request when Android reuses this activity.
     }
 }
 
@@ -114,6 +167,8 @@ class RelayCallActivity : ComponentActivity() {
 private fun RelayCallScreen(
     call: AppState.CallRelayState,
     canAnswer: Boolean,
+    microphoneDenied: Boolean,
+    onOpenSettings: () -> Unit,
     onAnswer: () -> Unit,
     onHangUp: () -> Unit,
     onClose: () -> Unit,
@@ -207,6 +262,14 @@ private fun RelayCallScreen(
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (microphoneDenied && call.phase == AppState.CallPhase.RINGING) {
+                Text(stringResource(R.string.call_microphone_needed),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedButton(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.call_open_settings))
+                }
+            }
             if (canAnswer) Button(
                 onClick = onAnswer,
                 modifier = Modifier.fillMaxWidth().height(56.dp),

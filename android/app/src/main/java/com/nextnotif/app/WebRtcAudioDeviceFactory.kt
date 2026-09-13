@@ -4,11 +4,14 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaRecorder
+import android.media.AudioFormat
+import android.os.SystemClock
+import android.util.Log
 import org.webrtc.audio.JavaAudioDeviceModule
 
 /**
- * Audio-device configuration for the WebRTC migration, not yet selected by the
- * live-call service. PeerConnectionFactory.initialize must precede creation.
+ * Audio-device configuration selected by the live-call service.
+ * PeerConnectionFactory.initialize must precede creation.
  * The call owner still manages foreground permissions, audio mode, root mixer
  * enable/restore, and module release; this factory never changes those states.
  */
@@ -43,6 +46,19 @@ internal object WebRtcAudioDeviceFactory {
             builder.setSampleRate(8_000)
                 .setUseHardwareAcousticEchoCanceler(false)
                 .setUseHardwareNoiseSuppressor(false)
+        }
+        if (BuildConfig.DEBUG) {
+            val capture = PcmSignalHealth()
+            val playback = PcmSignalHealth()
+            fun observe(path: String, health: PcmSignalHealth,
+                        samples: JavaAudioDeviceModule.AudioSamples) {
+                if (samples.audioFormat != AudioFormat.ENCODING_PCM_16BIT) return
+                health.observe(samples.data, SystemClock.elapsedRealtime())?.let { summary ->
+                    Log.i("WebRtcMediaHealth", "role=$role path=$path rate=${samples.sampleRate} channels=${samples.channelCount} $summary")
+                }
+            }
+            builder.setSamplesReadyCallback { samples -> observe("capture", capture, samples) }
+                .setPlaybackSamplesReadyCallback { samples -> observe("playback", playback, samples) }
         }
         return builder.createAudioDeviceModule()
     }

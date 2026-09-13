@@ -557,20 +557,11 @@ class RelayForegroundService : Service() {
             handleCallControl(code, evt.data)
             return
         }
+        // Durable replay must be checked before passive call state or teardown.
+        // The shared handler owns Ringing for every transport, including FCM.
+        if (!IncomingEventHandler.handle(this, evt.type, evt.data, code, evt.eventId)) return
         if (evt.type == "call" && code != null) {
             when (evt.data.optString("state")) {
-                "RINGING" -> {
-                    // A normal incoming-call event is still recorded and
-                    // notified below. Only expose the interactive Answer flow
-                    // when the rooted sender explicitly advertised support.
-                    if (evt.data.optBoolean("live_call_available", false)) {
-                        AppState.setIncomingCall(
-                            code,
-                            evt.data.optString("number").ifBlank { null },
-                            evt.data.optString("name").ifBlank { null },
-                        )
-                    }
-                }
                 "IDLE" -> {
                     val displayedLiveCall = AppState.callRelay.value.code == code
                     if (displayedLiveCall || activeCallCode == code || pendingAnswerCode == code ||
@@ -579,7 +570,6 @@ class RelayForegroundService : Service() {
                 }
             }
         }
-        IncomingEventHandler.handle(this, evt.type, evt.data, code, evt.eventId)
     }
 
     private fun sendOrQueue(type: String, payload: JSONObject) {
@@ -880,12 +870,18 @@ class RelayForegroundService : Service() {
 
     @Synchronized
     private fun answerRelayCall(code: String) {
+        val current = AppState.callRelay.value
+        if (!RelayCallUiPolicy.canBeginAnswer(activeCallCode, current.phase, current.code, code)) return
         val pairing = SessionStore.load(this).pairings.firstOrNull {
             it.code == code && it.role == Role.RECEIVER && it.enabled &&
                 (it.isWs || it.isFcmOnDemand)
         } ?: run {
             AppState.setError("Call relay requires an enabled FCM or WebSocket receiver pairing")
             AppState.finishCall(code, "Call relay is not available for this pairing")
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            AppState.finishCall(code, "Allow Microphone on the receiver before answering a relayed call")
             return
         }
         beginCallTracking(code)
@@ -1180,6 +1176,7 @@ class RelayForegroundService : Service() {
         val health = WebRtcMediaHealth(SystemClock.elapsedRealtime())
         var telemetryWarningShown = false
         var mediaObserved = false
+        var lastRtpDiagnosticAt = 0L
         mediaWatchdogJobs[code] = scope.launch {
             while (true) {
                 delay(2_000)
@@ -1194,6 +1191,10 @@ class RelayForegroundService : Service() {
                             if (callPeerSession == session) {
                                 val now = SystemClock.elapsedRealtime()
                                 health.observe(now, count)
+                                if (BuildConfig.DEBUG && now - lastRtpDiagnosticAt >= 5_000L) {
+                                    lastRtpDiagnosticAt = now
+                                    Log.i("WebRtcMediaHealth", "path=inbound_rtp packets=${count ?: "unavailable"}")
+                                }
                                 if (!mediaObserved && count != null && count > 0) {
                                     mediaObserved = true
                                     Log.i(TAG, "WebRTC inbound RTP observed")
@@ -1502,9 +1503,35 @@ class RelayForegroundService : Service() {
             start(ctx, ACTION_STOP_PAIRING, arrayOf("code" to code))
         }
 
-        fun answerCall(ctx: Context, code: String, number: String?, name: String?) {
-            if (AppState.callRelay.value.code != code) AppState.setIncomingCall(code, number, name)
-            start(ctx, ACTION_ANSWER_RELAY_CALL, arrayOf("code" to code))
+        @Synchronized
+        fun answerCall(ctx: Context, code: String, number: String?, name: String?, offeredAt: Long? = null) {
+            val pairing = SessionStore.load(ctx).pairings.firstOrNull { it.code == code } ?: return
+            if (pairing.role != Role.RECEIVER || !pairing.enabled ||
+                !(pairing.isWs || pairing.isFcmOnDemand)) return
+            val current = AppState.callRelay.value
+            if (!RelayCallUiPolicy.canRequestAnswer(current.phase, current.code, code)) return
+            val sourceTime = if (current.code == code) current.offeredAt else offeredAt
+            if (!CallEventFreshness.permitsInteraction(sourceTime, System.currentTimeMillis())) {
+                if (current.code == code) AppState.finishCall(code, ctx.getString(R.string.call_offer_expired))
+                AppState.setError(ctx.getString(R.string.call_offer_expired))
+                return
+            }
+            if (current.phase == AppState.CallPhase.IDLE) AppState.setIncomingCall(code, number, name, sourceTime)
+            // Claim the request synchronously so rapid taps cannot enqueue another
+            // answer while Android is still starting the foreground service.
+            AppState.updateCall(code, AppState.CallPhase.ANSWERING)
+            IncomingCallOfferStore.clear(ctx, code)
+            CallRequestDispatch.attempt(
+                start = { start(ctx, ACTION_ANSWER_RELAY_CALL, arrayOf("code" to code)) },
+                rejected = {
+                    val message = "Android could not start call relay. Open NextNotif and check Phone and Microphone permissions."
+                    if (AppState.callRelay.value.code == code &&
+                        AppState.callRelay.value.phase == AppState.CallPhase.ANSWERING) {
+                        AppState.finishCall(code, message)
+                    }
+                    AppState.setError(message)
+                },
+            )
         }
 
         fun endCall(ctx: Context, code: String) {

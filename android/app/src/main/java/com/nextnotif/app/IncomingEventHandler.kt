@@ -36,6 +36,12 @@ object IncomingEventHandler {
         } else null
         val name = localName ?: remoteName
         if (name != null) data.put("name", name)
+        if (type == "call" && code != null) {
+            IncomingCallOfferStore.observe(context, code, data.optString("state"), interactiveLiveCallAvailable(data),
+                callOfferTimestamp(data), number.takeIf { it.isNotBlank() }, name)
+            AppState.observeIncomingCall(code, data.optString("state"), interactiveLiveCallAvailable(data),
+                number.takeIf { it.isNotBlank() }, name, callOfferTimestamp(data))
+        }
         if (type == RelaySelfTest.EVENT_TYPE) {
             AppState.push("TEST", RelaySelfTest.receivedMessage(data), code, eventId)
         } else {
@@ -49,7 +55,8 @@ object IncomingEventHandler {
                 data.optString("state"),
                 name,
                 code,
-                liveCallAvailable = isLiveCallAvailable(data),
+                liveCallAvailable = interactiveLiveCallAvailable(data),
+                offeredAt = callOfferTimestamp(data),
             )
             RelaySelfTest.EVENT_TYPE -> IncomingNotifier.notifyRelayTest(context, code)
         }
@@ -61,7 +68,17 @@ object IncomingEventHandler {
      * malformed payloads as informational call events only.
      */
     internal fun isLiveCallAvailable(data: JSONObject): Boolean =
-        data.optBoolean("live_call_available", false)
+        data.opt("live_call_available") == true
+
+    internal fun interactiveLiveCallAvailable(data: JSONObject, now: Long = System.currentTimeMillis()): Boolean {
+        return isLiveCallAvailable(data) && CallEventFreshness.permitsInteraction(callOfferTimestamp(data), now)
+    }
+
+    internal fun callOfferTimestamp(data: JSONObject): Long? = when (val raw = data.opt("ts")) {
+            is Long -> raw
+            is Int -> raw.toLong()
+            else -> null
+        }
 
     private fun rememberIfNew(context: Context, eventId: String?): Boolean {
         val id = eventId?.takeIf { it.isNotBlank() } ?: return true

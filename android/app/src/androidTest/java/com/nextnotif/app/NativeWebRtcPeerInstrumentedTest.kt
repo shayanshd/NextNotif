@@ -31,11 +31,14 @@ class NativeWebRtcPeerInstrumentedTest {
         val receiverConnected = AtomicBoolean(false)
         val continuousOffer = AtomicBoolean(false)
         val continuousAnswer = AtomicBoolean(false)
+        val twoWayOffer = AtomicBoolean(false)
+        val twoWayAnswer = AtomicBoolean(false)
         lateinit var sender: WebRtcCallPeer
         lateinit var receiver: WebRtcCallPeer
         sender = WebRtcCallPeer(context, Role.SENDER, session, GatewayCapability.AVAILABLE, ice,
             audioEnabled = false, sendSignal = {
                 if (it.optString("kind") == "answer") continuousAnswer.set(WebRtcOpusPolicy.continuous(it.optString("sdp")))
+                if (it.optString("kind") == "answer") twoWayAnswer.set(WebRtcMediaDirection.bidirectional(it.optString("sdp")))
                 receiver.receive(it, Role.SENDER); true
             },
             onState = { if (it == PeerConnection.PeerConnectionState.CONNECTED && senderConnected.compareAndSet(false, true)) connected.countDown() },
@@ -43,6 +46,7 @@ class NativeWebRtcPeerInstrumentedTest {
         receiver = WebRtcCallPeer(context, Role.RECEIVER, session, GatewayCapability.ROOT_UNAVAILABLE, ice,
             audioEnabled = false, sendSignal = {
                 if (it.optString("kind") == "offer") continuousOffer.set(WebRtcOpusPolicy.continuous(it.optString("sdp")))
+                if (it.optString("kind") == "offer") twoWayOffer.set(WebRtcMediaDirection.bidirectional(it.optString("sdp")))
                 sender.receive(it, Role.RECEIVER); true
             },
             onState = { if (it == PeerConnection.PeerConnectionState.CONNECTED && receiverConnected.compareAndSet(false, true)) connected.countDown() },
@@ -56,6 +60,8 @@ class NativeWebRtcPeerInstrumentedTest {
             assertTrue("Native engine error: $errors", errors.isEmpty())
             assertTrue("Native offer must prefer continuous Opus", continuousOffer.get())
             assertTrue("Native answer must prefer continuous Opus", continuousAnswer.get())
+            assertTrue("Native offer must negotiate two-way audio", twoWayOffer.get())
+            assertTrue("Native answer must include gateway sending audio", twoWayAnswer.get())
             val stats = CountDownLatch(2)
             sender.requestReceivedPackets { stats.countDown() }
             receiver.requestReceivedPackets { stats.countDown() }

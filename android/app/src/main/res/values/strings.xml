@@ -255,7 +255,12 @@
     <string name="diag_privacy_note">NextNotif does not upload, save, or play the sampled audio. Only measurements appear in this report.</string>
     <string name="error_server_unreachable">Couldn\'t reach the server at %1$s</string>
     <string name="call_incoming">Incoming call</string>
+    <string name="call_open_screen">Open call screen</string>
+    <string name="notif_channel_calls">Incoming live calls</string>
     <string name="call_answer">Answer</string>
+    <string name="call_offer_expired">This call alert has expired. Wait for a new incoming call.</string>
+    <string name="call_microphone_needed">Allow Microphone to talk to the caller. The call has not been answered. You can retry or enable access in app settings.</string>
+    <string name="call_open_settings">Open app settings</string>
     <string name="call_answering">Answering on the sender phone…</string>
     <string name="call_connecting">Connecting audio…</string>
     <string name="call_connected">Connected</string>

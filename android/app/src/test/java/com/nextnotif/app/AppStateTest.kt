@@ -7,6 +7,48 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppStateTest {
+    @Test fun answerOfferKeepsOriginalTimeAcrossPhaseChanges() {
+        AppState.updateCall("offer", AppState.CallPhase.ENDED)
+        AppState.observeIncomingCall("offer", "RINGING", true, "caller", null, 100_000L)
+        assertEquals(100_000L, AppState.callRelay.value.offeredAt)
+        assertTrue(CallEventFreshness.permitsInteraction(AppState.callRelay.value.offeredAt, 100_000L))
+        assertEquals(false, CallEventFreshness.permitsInteraction(AppState.callRelay.value.offeredAt, 190_001L))
+        AppState.updateCall("offer", AppState.CallPhase.ANSWERING)
+        assertEquals(100_000L, AppState.callRelay.value.offeredAt)
+        AppState.finishCall("offer")
+    }
+
+    @Test fun repeatedRingingCannotResetOrReplaceAnEstablishedCall() {
+        for (phase in listOf(AppState.CallPhase.ANSWERING, AppState.CallPhase.CONNECTING,
+                AppState.CallPhase.ACTIVE, AppState.CallPhase.RECONNECTING)) {
+            AppState.updateCall("A", phase, number = "original")
+            val original = AppState.callRelay.value
+            AppState.observeIncomingCall("A", "RINGING", true, "repeat", null)
+            assertEquals(original, AppState.callRelay.value)
+            AppState.observeIncomingCall("B", "RINGING", true, "other", null)
+            assertEquals(original, AppState.callRelay.value)
+            AppState.observeIncomingCall("A", "IDLE", true, null, null)
+            assertEquals(original, AppState.callRelay.value)
+            AppState.finishCall("A")
+        }
+    }
+
+    @Test fun passiveFcmCallLifecycleAllowsNextCallButNotUnsupportedAnswer() {
+        AppState.updateCall("A", AppState.CallPhase.ENDED)
+        AppState.observeIncomingCall("A", "RINGING", false, "caller", null)
+        assertEquals(AppState.CallPhase.ENDED, AppState.callRelay.value.phase)
+        AppState.observeIncomingCall("A", "RINGING", true, "caller", "Name")
+        assertEquals(AppState.CallPhase.RINGING, AppState.callRelay.value.phase)
+        assertEquals("Name", AppState.callRelay.value.name)
+        AppState.observeIncomingCall("B", "IDLE", true, null, null)
+        assertEquals(AppState.CallPhase.RINGING, AppState.callRelay.value.phase)
+        AppState.observeIncomingCall("A", "IDLE", true, null, null)
+        assertEquals(AppState.CallPhase.ENDED, AppState.callRelay.value.phase)
+        AppState.observeIncomingCall("A", "RINGING", true, "next", null)
+        assertEquals("next", AppState.callRelay.value.number)
+        AppState.finishCall("A")
+    }
+
     @Test
     fun delayedCommunicationPreservesSourceTimestamp() {
         assertEquals(1_000L, communicationTimestamp(JSONObject().put("ts", 1_000L), 10_000L))

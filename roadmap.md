@@ -9,24 +9,96 @@ connection status of every paired partner.
 
 Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
-## MVP execution roadmap (paused for handoff 2026-09-12)
+## MVP execution roadmap (resumed 2026-09-12)
 
-Implementation is paused at the user's request. The product goal is not complete;
-its current product-managed status is **paused**. Resume from
+2026-09-13 latest call checkpoint: LAN speech both ways and in-app Answer confirmed.
+On mobile data, durable wss:// settings now permit receiver signaling and Samsung
+Answer, but media never connects (no STUN/TURN configured). Repeated media recreation
+keeps Connecting audio visible instead of a bounded failure. Next priorities are
+authenticated STUN/TURN provisioning and an overall media setup/reconnect deadline;
+then repeat mobile-data and five-minute stability tests. User requested dev checkpoint
+commit/push before continuing implementation.
+
+Implementation resumed after the handoff checkpoint on `dev`. The product goal is
+not complete. Resume context is recorded in
 [AGENT_HANDOFF.md](AGENT_HANDOFF.md), which distinguishes installed behavior from
 uninstalled changes and records the next tests and known defects.
 
 Immediate priorities on resumption:
 
-1. Fix duplicate Answer intents resetting an active call to Answering, and stale
-   notification intents overwriting the current call's identity.
-2. Verify and install the pending in-app Answer UI, without interrupting an unsaved
-   phone setup form. Latest unit tests, debug/release builds and debug lint pass.
+Latest controlled-call result: owner confirms caller audio now reaches Xiaomi after
+the Samsung answerer track-association fix. Combined with the previously working
+Xiaomi-to-caller path, basic two-way audio is demonstrated. Samsung capture signal
+and progressing RTP corroborate the fix; tests, debug/release builds and lint pass.
+Clarity, delay, packet-loss resilience and sustained-call stability remain open gates.
+
+Incoming-call discoverability: implemented locally an app-wide Ringing prompt with
+Answer/Open call screen, call-screen notification navigation and OS-controlled
+full-screen incoming-call notification. Preserve the existing design and microphone
+permission flow. Installed successfully on both idle phones with data preserved; verify foreground,
+background and locked-screen behavior, including full-screen access denied.
+
+Owner confirmed foreground incoming-call screen appeared and Answer worked directly
+from that screen. Next physical gate: background/locked-screen incoming call.
+
+Mobile-data test failed twice at receiver WebSocket signaling (timeouts and
+rendezvous_timeout before WebRTC). Upgraded both existing test pairings to wss://
+relay.amberdogeorgia.com via explicitly opted-in scoped device checks, preserving
+settings/history/live-call consent. Repeat mobile-data test before attributing the
+failure to ICE. STUN/TURN remains necessary work for reliable cross-network calling.
+
+USB/LTE follow-up: secure URL had reverted on Xiaomi despite prior in-memory test.
+Added durable maintenance flush; both phones now verified wss:// on disk after
+normal restart, with Samsung opt-in retained. Native and app-level no-audio WS
+upgrade probes succeed on LTE (app system DNS 798 ms; custom DNS 1076 ms). Authenticated
+call signaling and cross-network media still need owner retest; earlier timeout
+cannot be conclusively assigned to DNS or carrier filtering.
+
+Follow-up notification-only report: added short-lived durable incoming-offer recovery
+so reopening MainActivity or RelayCallActivity can restore Answer after process death.
+Preserves source-time expiry and pairing opt-in; clears on answer/end/connected.
+Tests/build/lint pass; verify dismiss notification then reopen during live ringing.
+
+2026-09-13 backend regression: today's deployed Worker lost compatible FCM routing.
+Restored the previously working deployed version 9d1489af to 100% traffic, preserving
+bound pairing storage and local changes. Registration route again validates requests
+instead of returning 404; verify real receiver registration and owner SMS/call retest.
+
+1. Verify the new duplicate Answer guards and stale-notification identity fix on
+   devices. Controller claims Answer synchronously; service rejects existing active
+   sessions; simply opening a notification no longer manufactures incoming state.
+   Explicit Answer can recover only an empty idle process with an enabled receiver
+   pairing. JVM policy coverage spans all phases and mismatched pairing codes.
+2. Verify the installed in-app Answer UI and intent guards on a controlled call.
+   Latest unit tests, debug/release builds and debug lint pass. Both idle phones now
+   have the tested update installed with data preserved; Samsung opt-in is confirmed.
 3. Confirm the Samsung owner's live-call opt-in, then explicitly invite the user to
    place a controlled call. VPN-off, two-phone ICE with device audio disabled passed;
-   actual cellular WebRTC audio, volume, delay, mute and hang-up are not yet proven.
+   basic actual cellular WebRTC audio now works both ways; volume, delay, sustained
+   stability, mute and hang-up still require verification.
 4. Complete TURN/VPN support, authenticated setup/WebSocket hardening, delivery and
    recovery tests, UX verification and the MVP release checklist.
+
+Resumed delivery/call-state work: FCM fetch now shares Ringing state handling; service
+checks duplicate durable events before passive state/teardown, and repeated Ringing
+cannot replace an established session. Availability parsing requires JSON boolean
+true. New unit coverage passes as part of verification; these latest changes are now
+installed on both test phones. Receiver first-Answer microphone prompting is
+implemented; Xiaomi already has the owner grant, so denial/first-grant dialog tests
+remain. Prioritize integrated duplicate-Idle tests and call-generation/expiry guards
+before release claims.
+
+Delayed-offer protection is now implemented locally: communication history is kept,
+but call information needs a valid source timestamp no older than 90 seconds (with
+30 seconds future skew tolerance) to expose live interaction on receipt. This latest
+guard is uninstalled. End-to-end per-call identity, expiration at action tap and stale
+Idle protection remain required; receipt freshness is not a substitute for those gates.
+
+Answer-time freshness is also implemented locally: original source time travels with
+the call-screen state and notification, is checked before/after permission and again
+before dispatch, including process-death recovery. Expired actions report an expired
+alert instead of answering. This remains uninstalled and needs physical prompt/delayed
+tap testing; a timestamp is not authenticated per-call identity.
 
 ### MVP promise
 
@@ -42,6 +114,21 @@ gateway is ready, receive and revisit messages/calls, recover from ordinary netw
 failures, and identify when an action is required without reading a technical log.
 
 ### P0 — required before an MVP build
+
+Latest physical live-call evidence: controlled cellular call failed two-way audio;
+owner reports Xiaomi-to-caller works but caller-to-Xiaomi is inaudible. Samsung retains
+privileged status and CAPTURE_AUDIO_OUTPUT grant. Prioritize source PCM versus receiver
+RTP/playout diagnostics and a repeat controlled call; the live-audio gate remains open.
+The debug-only five-second capture/playout signal summaries and periodic inbound RTP
+counts are now installed on both idle test phones with data preserved, alongside
+Answer-time expiry checks. Verification passes; repeat-call evidence is pending.
+Repeat diagnostics show Samsung receives RTP and playback signal; Xiaomi capture has
+signal but no inbound RTP, with no Samsung capture summaries. Corrected answerer
+track association locally (addTrack rather than unassociated addTransceiver), with
+two-way SDP validation and a strengthened native no-audio regression. Installation,
+native regression execution and actual bidirectional cellular speech are still pending.
+Update: fix installed on both phones; strengthened Samsung native audio-disabled
+regression passes 2 tests (0.487 s). Actual two-way cellular speech remains unverified.
 
 #### M0. Product boundary and safety
 

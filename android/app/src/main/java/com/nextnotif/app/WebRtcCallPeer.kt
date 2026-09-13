@@ -90,7 +90,13 @@ internal class WebRtcCallPeer(
         source = factory!!.createAudioSource(constraints)
         track = factory!!.createAudioTrack("nextnotif-audio", source)
         track!!.setEnabled(microphone.trackEnabled)
-        val transceiver = peer!!.addTransceiver(track)
+        val transceiver = if (role == Role.SENDER) {
+            // An addTransceiver-created unbound sender is NOT associated with
+            // an incoming offer. addTrack permits offer association, ensuring
+            // our gateway capture track participates in the initial answer.
+            val sender = peer!!.addTrack(track)
+            peer!!.transceivers.single { it.sender.id() == sender.id() }
+        } else peer!!.addTransceiver(track)
         val opus = WebRtcOpusPolicy.preferences(factory!!.getRtpSenderCapabilities(
             MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO).codecs)
         check(opus.isNotEmpty()) { "Opus unavailable" }
@@ -112,6 +118,7 @@ internal class WebRtcCallPeer(
                 }
                 is WebRtcSignal.Description -> {
                     check(WebRtcOpusPolicy.continuous(signal.sdp)) { "Continuous Opus is required" }
+                    check(WebRtcMediaDirection.bidirectional(signal.sdp)) { "Two-way audio negotiation is required" }
                     check(!remoteDescriptionStarted) { "Duplicate remote description" }
                     check(signal.sdp.lineSequence().filter { it.startsWith("m=") }.all { it.startsWith("m=audio ") }) {
                         "Only audio negotiation is supported"
@@ -136,6 +143,7 @@ internal class WebRtcCallPeer(
     private fun createDescription(offer: Boolean) {
         val callback = sdpObserver(onCreate = { description ->
             check(WebRtcOpusPolicy.continuous(description.description)) { "Continuous Opus is required" }
+            check(WebRtcMediaDirection.bidirectional(description.description)) { "Two-way audio negotiation is required" }
             peer!!.setLocalDescription(sdpObserver(onSet = {
                 send(WebRtcSignal.Description(sessionId, offer, description.description))
                 localDescriptionSent = true

@@ -154,6 +154,12 @@ rotate, delete the user under **Authentication → Users** or re-pair with a new
 
 ## Build & install the Android app
 
+Before Gradle sync, place your Firebase Android app configuration at
+`android/app/google-services.json` (package `com.nextnotif.app`). This local file is
+intentionally excluded from Git. Download it from your Firebase project settings;
+do not substitute a service-account key. Client configuration is distinct from the
+server's private FCM credentials, which must never ship in the APK or repository.
+
 Open `android/` in Android Studio (Giraffe or newer). Gradle sync, then Run. (Or `cd android && ./gradlew assembleDebug` with a JDK 17.)
 
 `minSdk = 26` (Android 8.0 Oreo). Runs on Android 8 and newer; tested target = API 34.

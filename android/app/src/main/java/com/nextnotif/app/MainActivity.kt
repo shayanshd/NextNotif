@@ -22,6 +22,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -83,6 +84,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AppState.initializeMessages(this)
+        IncomingCallOfferStore.restore(this)
         Notifications.ensureChannels(this)
         // Token acquisition is independent of the relay service, which lets a
         // normal app launch register FCM even before the user starts relaying.
@@ -109,6 +111,27 @@ class MainActivity : ComponentActivity() {
         setContent {
             val session by sessionState
             NextNotifTheme {
+                val call by AppState.callRelay.collectAsState()
+                val receiver = session.pairings.firstOrNull { it.code == call.code }
+                if (receiver != null && RelayCallUiPolicy.canAnswer(call.phase, receiver.role, receiver.enabled)) {
+                    AlertDialog(
+                        onDismissRequest = { /* Keep the incoming call reachable until it ends. */ },
+                        title = { Text(stringResource(R.string.call_incoming)) },
+                        text = { Text(call.callerLabel) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                startActivity(RelayCallActivity.createIntent(this, receiver.code,
+                                    call.number, call.name, answer = true, offeredAt = call.offeredAt))
+                            }) { Text(stringResource(R.string.call_answer)) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                startActivity(RelayCallActivity.createIntent(this, receiver.code,
+                                    call.number, call.name, answer = false, offeredAt = call.offeredAt))
+                            }) { Text(stringResource(R.string.call_open_screen)) }
+                        },
+                    )
+                }
                 when {
                     permGateMissing.value.isNotEmpty() -> PermissionsGateScreen(
                         missing = permGateMissing.value,

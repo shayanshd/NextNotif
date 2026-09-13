@@ -22,6 +22,10 @@ class IncomingEventHandlerTest {
 
     @Test
     fun `false and malformed values remain informational only`() {
+        for (value in listOf("true", "false", 1, 0, JSONObject.NULL)) {
+            assertFalse(IncomingEventHandler.isLiveCallAvailable(
+                JSONObject().put("live_call_available", value)))
+        }
         assertFalse(
             IncomingEventHandler.isLiveCallAvailable(
                 JSONObject().put("live_call_available", false),
