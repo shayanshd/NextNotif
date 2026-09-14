@@ -89,9 +89,13 @@ internal fun ConversationBubble(entry: AppState.Entry) {
             SelectionContainer {
                 Text(presentation.body.orEmpty(), style = MaterialTheme.typography.bodyLarge, color = foreground)
             }
-            Text(stringResource(if (outgoing) R.string.home_messages_direction_sent else R.string.home_messages_direction_received) +
+            Text((entry.communication?.smsStatus?.let { smsStatusLabel(it) }
+                ?: stringResource(if (outgoing) R.string.home_messages_direction_sent else R.string.home_messages_direction_received)) +
                 " · " + DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(entry.ts)),
                 style = MaterialTheme.typography.labelSmall, color = foreground)
+            entry.communication?.smsDetail?.takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = foreground)
+            }
         }
     }
 }

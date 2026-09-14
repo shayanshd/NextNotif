@@ -11,6 +11,43 @@ Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
 ## MVP execution roadmap (resumed 2026-09-12)
 
+Checkpoint 2026-09-14 — receiver SMS sending and sender SIM selection:
+
+- Receiver composers expose **Sender SIM**, with reported slot, name and carrier,
+  an explicit subscription choice, sender-default mode, and **Refresh SIMs**.
+- Sender-authenticated SMS fetches publish SIM inventory; receiver status requests
+  can wake the sender for refreshed inventory. Both Python and Worker relays persist
+  the snapshot and preserve the selected subscription in immutable SMS commands.
+- The sender rechecks active subscriptions before modem access. An unavailable
+  explicit SIM fails without falling back to a different SIM.
+- Validation: Android unit tests and debug/test APK builds pass; Python mailbox HTTP
+  tests and Worker mailbox/HTTP tests pass, including role protection, inventory
+  persistence, immutable SIM selection and no-fallback selection behavior.
+- Emulator interaction test passes selecting SIM 2 and returning to sender default;
+  selector screenshots checked in light and dark themes, with 1.3× text in dark mode.
+  Captures use synthetic SIMs and never send a message.
+- Deployed Worker version `482cd705-1a2e-4e85-b297-b26423812be0` to
+  `relay.amberdogeorgia.com`; installed updated debug APK on Xiaomi 23049PCD8G
+  receiver and Samsung SM-A520F sender, preserving existing FCM pairing settings.
+  Updated Samsung Magisk module APK as well (SHA-256 matches the installed build
+  artifact); no reboot needed for the already-installed app update.
+- Explicit live SIM checks pass on both phones: Samsung publishes two active SIMs,
+  and Xiaomi reads SIM 1 / CARD 1 / IR-MCI and SIM 2 / CARD 2 / Irancell through the
+  deployed relay. Tests share only SIM metadata and never process/send SMS commands.
+- Owner subsequently attempted two single-part sends with `subscription_id=2`;
+  Samsung recorded both as failed. Owner confirmed Samsung's normal Messages app
+  also fails on SIM 2 (Irancell). This indicates a SIM/carrier/device sending issue
+  independent of NextNotif; the exact cause is not established. Both SIMs report READY.
+- An earlier stored one-part request has a successful carrier callback. This does not
+  establish successful sending on both SIMs. No SMS was sent or retried by the agent.
+- Current callback handling stores only success/failure, discarding Android's specific
+  result/radio error codes. The generic partial-send wording is misleading for a
+  single-part failure. Richer error reporting was proposed but NOT implemented.
+- Owner paused diagnosis and requested commit/push plus roadmap and handoff updates.
+  Next: investigate SIM 2's native Messages failure if requested; preserve failed
+  request IDs and never automatically retry uncertain or failed carrier sends.
+
+
 Latest checkpoint 2026-09-13 (overrides historical TURN pending/billing notes below):
 
 - [x] Owner activated Cloudflare; keys stored in GitHub and encrypted Worker secrets.

@@ -1,3 +1,4 @@
+import { submitSms, updateSms, expireSms, simOptions } from './sms-mailbox.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import { cloudflareIceServers, consumeIceBudget } from './turn-credentials.mjs';
 import { SecurePairingStore } from './secure-pairing-store.mjs';
@@ -311,6 +312,13 @@ export class RelayPairing extends DurableObject {
     return issued;
   }
 
+  signalSmsSync(role) {
+    const socket = this.liveSockets()[role];
+    if (socket) {
+      try { socket.send(JSON.stringify({type: 'sms_sync', data: {}})); } catch { /* reconnect sync catches up */ }
+    }
+  }
+
   async fcmAccessToken(sa) {
     if (this._fcmToken && this._fcmTokenExpiry > Date.now()) return this._fcmToken;
     const tokenUrl = this.env.FCM_TOKEN_URL || 'https://oauth2.googleapis.com/token';
@@ -450,18 +458,63 @@ export class RelayPairing extends DurableObject {
     const isWsUpgrade = (request.headers.get('Upgrade') || '').toLowerCase() === 'websocket';
     const parts = url.pathname.split('/').filter(Boolean);
     const operation = parts[0];
+    const smsOperation = ['sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(operation);
+    const requestedRole = request.headers.get('X-NextNotif-Role') || 'receiver';
+    if (!['sender', 'receiver'].includes(requestedRole)) return Response.json({error: 'invalid role'}, {status: 400});
     let secure = false;
     try {
       if (operation === 'ws') {
         // Secure WS support follows HTTP guards. Until then deny before slot
         // replacement, pending metadata, or legacy token minting can occur.
         if (await this.securityMode() !== 'legacy') throw new AuthorizationError();
-      } else if (operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
-        secure = await this.authorizeHttp(request, operation === 'send' ? 'sender' : ['status', 'ice'].includes(operation) ? null : 'receiver');
+      } else if (smsOperation || operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
+        secure = await this.authorizeHttp(request, operation === 'send' || ['sms-fetch', 'sms-result'].includes(operation) ? 'sender' : operation === 'fcm-register' ? requestedRole : ['status', 'ice'].includes(operation) ? null : 'receiver');
       }
     } catch (error) {
       if (!(error instanceof AuthorizationError)) throw error;
       return Response.json({ error: 'pairing authorization failed' }, { status: 401 });
+    }
+
+    if (smsOperation && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
+      this.code = parts[1];
+      const role = ['sms-fetch', 'sms-result'].includes(operation) ? 'sender' : 'receiver';
+      const token = request.headers.get('X-NextNotif-Token');
+      const roles = (await this.state.storage.get('tokenRoles')) || {};
+      if (!secure && (!token || roles[token] !== role || !(await this.getTokens()).includes(token)))
+        return Response.json({error: 'pairing authorization failed'}, {status: 401});
+      let body = {};
+      try { body = await request.json(); } catch { return Response.json({error: 'invalid body'}, {status: 400}); }
+      if (!body || typeof body !== 'object' || Array.isArray(body))
+        return Response.json({error: 'invalid body'}, {status: 400});
+      if (operation === 'sms-fetch' && Object.hasOwn(body, 'sim_options')) {
+        const options = simOptions(body.sim_options);
+        if (!options) return Response.json({error: 'invalid SIM options'}, {status: 400});
+        await this.state.storage.put('smsSimOptions', options);
+      }
+      if (operation === 'sms-status' && body.request_sims === true) {
+        this.signalSmsSync('sender');
+        this.state.waitUntil(this.maybeFcmWake('sender', {type: 'sms_request'}));
+      }
+      let records = expireSms((await this.state.storage.get('smsCommands')) || []);
+      if (operation === 'sms-submit') {
+        const result = submitSms(records, body);
+        if (result.error) return Response.json({error: result.error}, {status: result.status});
+        await this.state.storage.put('smsCommands', result.records);
+        this.signalSmsSync('sender');
+        this.state.waitUntil(this.maybeFcmWake('sender', {type: 'sms_request'}));
+        return Response.json({command: result.command});
+      }
+      if (operation === 'sms-result' && !updateSms(records, body))
+        return Response.json({error: 'invalid result'}, {status: 400});
+      await this.state.storage.put('smsCommands', records);
+      if (operation === 'sms-result') {
+        this.signalSmsSync('receiver');
+        this.state.waitUntil(this.maybeFcmWake('receiver', {type: 'sms_status'}));
+        return Response.json({ok: true});
+      }
+      return Response.json({commands: operation === 'sms-fetch'
+        ? records.filter(x => ['queued', 'sending'].includes(x.status)) : records,
+        sim_options: (await this.state.storage.get('smsSimOptions')) ?? null});
     }
 
     if (operation === 'ice' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
@@ -573,24 +626,30 @@ export class RelayPairing extends DurableObject {
       } catch {
         body = null;
       }
-      if (!body || !isValidFcmToken(body.fcm_token)) {
+      if (!body || !(isValidFcmToken(body.fcm_token) || (body.delivery_mode === 'ws' && !body.fcm_token))) {
         return Response.json({ error: 'invalid body' }, { status: 400 });
       }
+      const tokenRoles = (await this.state.storage.get('tokenRoles')) || {};
+      if (body.device_token && tokenRoles[body.device_token] && tokenRoles[body.device_token] !== requestedRole)
+        return Response.json({error: 'credential role mismatch'}, {status: 401});
       // FCM-only pairings never open a bootstrap WebSocket. Let the receiver's
       // first valid registration claim the six-digit code atomically inside
       // this Durable Object, matching the typed-code WebSocket behavior.
       await this.state.storage.put('paired', '1');
       this.code = code;
-      await this.storeFcmToken('receiver', body.fcm_token);
-      await this.setDeliveryMode('receiver', 'fcm');
+      await this.storeFcmToken(requestedRole, body.fcm_token);
+      await this.setDeliveryMode(requestedRole, body.delivery_mode === 'ws' ? 'ws' : 'fcm');
       const name = typeof body.device_name === 'string' ? body.device_name.trim().slice(0, 64) : '';
       if (name) {
         const names = await this.getNames();
-        names.receiver = name;
+        names[requestedRole] = name;
         await this.putNames(names);
       }
       const issued = secure ? (request.headers.get('X-NextNotif-Token') ||
         (request.headers.get('Authorization') || '').slice(7)) : await this.issueDeviceToken(body.device_token);
+      tokenRoles[issued] = requestedRole;
+      const activeTokens = await this.getTokens();
+      await this.state.storage.put('tokenRoles', Object.fromEntries(Object.entries(tokenRoles).filter(([t]) => activeTokens.includes(t))));
       return Response.json({ device_token: issued });
     }
 
@@ -708,7 +767,14 @@ export class RelayPairing extends DurableObject {
       // anything else (first connect, stale token, legacy client) gets a fresh
       // one. Code-only auth stays the bootstrap path; ongoing relays ride on
       // the high-entropy token (max MAX_DEVICE_TOKENS kept per pairing).
+      const tokenRoles = (await this.state.storage.get('tokenRoles')) || {};
+      if (msg.device_token && tokenRoles[msg.device_token] && tokenRoles[msg.device_token] !== role) {
+        ws.close(1008, 'credential role mismatch');
+        return;
+      }
       const issued = await this.issueDeviceToken(msg.device_token);
+      tokenRoles[issued] = role;
+      await this.state.storage.put('tokenRoles', tokenRoles);
       ws.send(JSON.stringify({ type: 'auth_ok', device_token: issued }));
       if (role === 'receiver') {
         // An explicitly FCM-mode receiver may open a temporary call socket.
@@ -870,7 +936,7 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 1 &&
-      ['fcm-register', 'drain', 'fetch', 'ack', 'ice'].includes(parts[0])
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(parts[0])
     ) {
       if (!isValidCode(headerCode)) {
         return Response.json({ error: 'missing pairing code' }, { status: 400 });
@@ -881,7 +947,7 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 2 &&
-      ['fcm-register', 'drain', 'fetch', 'ack', 'ice'].includes(parts[0])
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(parts[0])
     ) {
       const code = isValidCode(headerCode) ? headerCode : parts[1];
       if (!isValidCode(code)) return new Response('Not found', { status: 404 });

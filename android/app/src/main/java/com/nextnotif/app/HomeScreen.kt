@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -104,7 +106,12 @@ fun HomeScreen(
 ) {
     val connState by AppState.conn.collectAsState()
     val log by AppState.log.collectAsState()
-    val messages by AppState.messages.collectAsState()
+    val savedMessages by AppState.messages.collectAsState()
+    val outgoingSms by SmsOutbox.records.collectAsState()
+    val messages = remember(savedMessages, outgoingSms) {
+        (savedMessages + outgoingSms.filterNot { it.optBoolean("hidden") }.map(SmsOutbox::asEntry)).sortedByDescending { it.ts }
+    }
+    var composingNew by rememberSaveable { mutableStateOf(false) }
     val connStates by AppState.connStates.collectAsState()
     val partnerStates by AppState.partnerStates.collectAsState()
     val pairingErrors by AppState.pairingErrors.collectAsState()
@@ -132,6 +139,17 @@ fun HomeScreen(
         if (selectedMessagePairing != null && pairings.none { it.code == selectedMessagePairing }) {
             selectedMessagePairing = null
         }
+    }
+
+    if (composingNew) {
+        NewSmsScreen(pairings, onBack = { composingNew = false }, onSent = { id ->
+            composingNew = false
+            selectedMessagePairing = null
+            selectedConversation = textConversations(SmsOutbox.records.value.map(SmsOutbox::asEntry))
+                .firstOrNull { t -> t.entries.any { it.eventId == "sms-send:$id" } }?.key
+            destination = HomeDestination.MESSAGES
+        })
+        return
     }
 
     Scaffold(
@@ -259,7 +277,10 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            if (destination == HomeDestination.OVERVIEW) {
+            if (destination == HomeDestination.MESSAGES && conversation == null && pairings.any { it.enabled && it.role == Role.RECEIVER && !it.isFirebase }) {
+                ExtendedFloatingActionButton(onClick = { composingNew = true },
+                    icon = { Icon(Icons.Default.Edit, null) }, text = { Text(stringResource(R.string.sms_new_message)) })
+            } else if (destination == HomeDestination.OVERVIEW) {
                 ExtendedFloatingActionButton(
                     onClick = onAddPairing,
                     icon = { Icon(Icons.Default.Add, contentDescription = null) },
@@ -268,7 +289,11 @@ fun HomeScreen(
             }
         },
         bottomBar = {
-            NavigationBar {
+            if (conversation != null && destination == HomeDestination.MESSAGES) {
+                Box(Modifier.navigationBarsPadding().imePadding()) {
+                    SmsComposer(pairings.firstOrNull { it.code == conversation.code }, conversationNumber(conversation), conversation.key)
+                }
+            } else NavigationBar {
                 HomeDestination.entries.forEach { item ->
                     NavigationBarItem(
                         selected = destination == item,
@@ -306,6 +331,11 @@ fun HomeScreen(
             initialFirstVisibleItemIndex = if (conversation != null && destination == HomeDestination.MESSAGES)
                 conversation.entries.size + conversation.entries.map { historyDay(it.ts) }.distinct().size else 0,
         )
+        LaunchedEffect(conversation?.entries?.firstOrNull()?.eventId) {
+            if (conversation?.entries?.firstOrNull()?.communication?.smsStatus == "pending") {
+                historyListState.animateScrollToItem(conversation.entries.size + conversation.entries.map { historyDay(it.ts) }.distinct().size)
+            }
+        }
         LazyColumn(
             state = historyListState,
             modifier = Modifier
@@ -315,7 +345,7 @@ fun HomeScreen(
                 start = 16.dp,
                 end = 16.dp,
                 top = 0.dp,
-                bottom = if (destination == HomeDestination.OVERVIEW) 96.dp else 24.dp,
+                bottom = if (destination == HomeDestination.OVERVIEW || (destination == HomeDestination.MESSAGES && conversation == null)) 96.dp else 24.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -334,6 +364,7 @@ fun HomeScreen(
                             onToggleService = onToggleService,
                         )
                     }
+                    if (pairings.any { it.enabled && it.role == Role.SENDER && !it.isFirebase }) item { SmsPermissionCard() }
                     if (notifPermMissing) item { NotifPermBanner(onEnable = onRequestNotifPerm) }
                     if (liveCallPermMissing) item {
                         LiveCallPermBanner(onFinishSetup = onFinishLiveCallSetup)
@@ -370,7 +401,7 @@ fun HomeScreen(
                 HomeDestination.MESSAGES, HomeDestination.CALLS -> {
                     val isCalls = destination == HomeDestination.CALLS
                     if (conversation != null && !isCalls) {
-                        item { LogIntro(stringResource(R.string.conversation_history_only)) }
+                        item { LogIntro(conversationNumber(conversation) ?: stringResource(R.string.conversation_history_only)) }
                         val chronological = conversation.entries.sortedBy { it.ts }
                         chronological.forEachIndexed { index, entry ->
                             val day = historyDay(entry.ts)
@@ -443,6 +474,8 @@ fun HomeScreen(
                 TextButton(
                     onClick = {
                         AppState.clearMessages(context)
+                        SmsOutbox.store(context).hideHistory()
+                        SmsOutbox.refresh(context)
                         selectedMessagePairing = null
                         selectedConversation = null
                         showClearHistoryConfirm = false

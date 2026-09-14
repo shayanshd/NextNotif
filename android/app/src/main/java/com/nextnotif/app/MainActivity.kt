@@ -84,6 +84,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AppState.initializeMessages(this)
+        SmsOutbox.refresh(this)
         IncomingCallOfferStore.restore(this)
         Notifications.ensureChannels(this)
         // Token acquisition is independent of the relay service, which lets a

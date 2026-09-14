@@ -37,6 +37,54 @@ SMS/call events still fall back to `POST /send` and the local SharedPreferences
 outbox when needed. Binary WebSocket frames are reserved for live G.711 call audio and are
 never queued, persisted, or sent through FCM.
 
+## Send SMS from the receiver (no root)
+
+Install the updated APK on both phones and update the relay server. On the sender,
+turn on **SMS replies** in Overview and grant SMS permission. On the receiver,
+open a conversation to reply, or choose **Messages → New message** and select the
+paired sender. Under **Sender SIM**, choose a reported SIM (slot, name and carrier)
+or **Use sender’s default**. **Refresh SIMs** asks the sender for an updated list;
+the sender needs phone permission and internet access. SIM details are last reported
+information, not a guarantee that the phone is currently online. A removed or disabled
+selected SIM fails the request without switching to another SIM. Selection applies
+to the current composer and does not change Android’s default SIM. Carrier charges
+apply; long messages may use multiple SMS parts.
+
+Sending supports FCM and WebSocket-server pairings. Custom Firebase Database
+pairings currently support forwarded history only. Both phones need internet for
+relay delivery, and the sender needs cellular service. Requests expire after one
+hour if they have not reached the modem.
+
+The sender records each request before calling Android's SMS API. Retries retain
+the same UUID, and the relay rejects changed content using an existing UUID.
+“Sent to carrier” appears only when every SMS part receives Android's successful
+sent callback; it is not a recipient delivery receipt. A crash or missing callback
+shows an unconfirmed result and never automatically resends through the modem.
+Check the sender before manually sending that text again. Clearing history hides
+outgoing rows but does not cancel requests or remove duplicate-protection records.
+
+The return path uses `POST /sms-submit` and `/sms-status` with a receiver credential,
+and `/sms-fetch` and `/sms-result` with a sender credential. `POST /fcm-register`
+accepts `X-NextNotif-Role` (default `receiver`) and binds issued tokens to that role.
+Sender-authenticated `/sms-fetch` may publish `sim_options`; receiver-authenticated
+`/sms-status` returns them and accepts `request_sims: true` to wake the sender.
+Commands carry an optional immutable `subscription_id` (null means sender default).
+Only slot, display name, carrier and subscription ID are shared; no SIM serial or
+phone-number permission is needed. Update both apps and the relay for SIM selection.
+FCM contains only a wake signal; message content stays in the authenticated HTTP
+queue. Existing six-digit legacy pairing bootstrap remains unchanged.
+
+Validation without sending a real SMS:
+
+```bash
+cd server
+.venv/bin/python -m unittest test_sms_mailbox.py
+cd ../server-workers
+node test_sms_mailbox.mjs
+# With a local Worker listening on port 8787:
+../server/.venv/bin/python test_sms_http.py
+```
+
 ## Optional live call relay (rooted gateway beta)
 
 Live calling is disabled by default and enabled separately on each **Sender** pairing.

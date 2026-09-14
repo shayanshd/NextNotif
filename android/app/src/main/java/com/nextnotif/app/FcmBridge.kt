@@ -46,6 +46,7 @@ object FcmBridge {
                 SessionStore.saveFcmToken(context, token)
                 Log.i(TAG, "FCM token acquired (${token.length} chars)")
                 FcmOnDemand.enqueueAll(context)
+                SmsRelay.enqueueAll(context)
                 onToken(token)
             }
             .addOnFailureListener { error ->
@@ -59,6 +60,7 @@ class NextNotifMessagingService : FirebaseMessagingService() {
         SessionStore.saveFcmToken(this, token)
         Log.i("NextNotifFCM", "FCM token refreshed (${token.length} chars)")
         FcmOnDemand.enqueueAll(this)
+        SmsRelay.enqueueAll(this)
         // Persistent WebSocket pairings publish the refreshed token when the
         // service starts; an FCM-only receiver never starts that service.
         RelayForegroundService.Controller.start(this)
@@ -67,6 +69,7 @@ class NextNotifMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         Log.i("NextNotifFCM", "FCM message received (keys=${message.data.keys.sorted()})")
         if (message.data["nn"] == "1") {
+            SmsRelay.handlePush(this, message.data)
             if (!FcmOnDemand.handlePush(this, message.data)) {
                 RelayForegroundService.Controller.start(this)
             }
@@ -75,5 +78,6 @@ class NextNotifMessagingService : FirebaseMessagingService() {
 
     override fun onDeletedMessages() {
         FcmOnDemand.enqueueAll(this)
+        SmsRelay.enqueueAll(this)
     }
 }

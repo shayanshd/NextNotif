@@ -249,6 +249,7 @@ class RelayForegroundService : Service() {
 
     /** Connect one pairing on its transport (Firebase relay or WebSocket). */
     private fun connectPairing(p: PairingInfo) {
+        if (!p.isFirebase) SmsRelay.enqueue(this, p.code)
         // Warm the bounded root/helper cache when the user explicitly enables
         // live calls. This keeps the first RINGING event from waiting on su.
         if (p.role == Role.SENDER && p.liveCallEnabled) {
@@ -555,6 +556,10 @@ class RelayForegroundService : Service() {
     }
 
     private fun handleIncoming(evt: RelaySocket.Event.Incoming, code: String?) {
+        if (evt.type == "sms_sync" && code != null) {
+            SmsRelay.enqueue(this, code)
+            return
+        }
         if (evt.type == "call_control" && code != null) {
             handleCallControl(code, evt.data)
             return

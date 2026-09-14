@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import fcm
+import sms_mailbox
 from fcm import wake as fcm_wake
 from secure_pairing import AuthorizationError, MODE as SECURE_MODE, authorize_deletion
 from secure_pairing_store import SecurePairingStore
@@ -46,6 +47,9 @@ class Pairing:
         # High-entropy per-device credentials issued at first auth. The 6-digit
         # code stays the bootstrap/pairing key; the token is the relay credential.
         self.tokens: list = list(tokens or [])
+        self.token_roles: dict = {}
+        self.sms_commands: list = []
+        self.sms_sim_options = None
         # Sender events uplinked while the receiver was offline, as ready-to-send
         # wire strings, oldest first. Flushed in order on the receiver's (re)connect.
         self.queue: list = [item for item in (queue or []) if isinstance(item, str)]
@@ -113,6 +117,10 @@ class Registry:
                 delivery = {}
             pairing = self.pairings.setdefault(code, Pairing(code, tokens, queue))
             pairing.security_mode = mode
+            if isinstance(value, dict):
+                pairing.token_roles = value.get("token_roles", {})
+                pairing.sms_commands = value.get("sms_commands", [])
+                pairing.sms_sim_options = value.get("sms_sim_options")
             pairing.fcm.update(fcm_tokens)
             pairing.delivery.update(delivery)
 
@@ -126,6 +134,9 @@ class Registry:
                         {**self.blocked_records, **{
                             code: {
                                 "tokens": p.tokens,
+                                "token_roles": p.token_roles,
+                                "sms_commands": p.sms_commands,
+                                "sms_sim_options": p.sms_sim_options,
                                 "security_mode": p.security_mode,
                                 **({"queue": p.queue} if p.queue else {}),
                                 **({"fcm": p.fcm} if p.fcm else {}),
@@ -375,6 +386,9 @@ async def _ws_session(ws: WebSocket, role: str, path_code: Optional[str]) -> Non
         # anything else (first connect, stale token, legacy client) gets a fresh
         # one. Code-only auth thus stays a bootstrap path, while ongoing relays
         # ride on the high-entropy token.
+        if pairing.token_roles.get(auth.get("device_token"), role) != role:
+            await ws.close(code=1008, reason="credential role mismatch")
+            return
         issued = (auth["device_token"] if pairing.security_mode != "legacy"
                   else _issue_device_token(pairing, auth.get("device_token")))
         if role == "receiver":
@@ -383,6 +397,8 @@ async def _ws_session(ws: WebSocket, role: str, path_code: Optional[str]) -> Non
         # The auth message may carry a fresher FCM wake token than hello did.
         if _store_fcm_token(pairing, role, auth.get("fcm_token")):
             registry.save()
+        pairing.token_roles[issued] = role
+        registry.save()
         await ws.send_text(json.dumps({"type": "auth_ok", "device_token": issued}))
 
         if role == "receiver" and pairing.delivery.get("receiver") != "fcm":
@@ -577,26 +593,34 @@ async def _handle_fcm_register(request: Request, code: Optional[str]):
     if not _valid_code(code):
         return JSONResponse({"error": "missing pairing code"}, status_code=400)
     body = _safe_json((await request.body()).decode("utf-8", "replace"))
-    if not isinstance(body, dict) or not fcm.valid_token(body.get("fcm_token")):
+    if not isinstance(body, dict) or not (fcm.valid_token(body.get("fcm_token")) or
+            (body.get("delivery_mode") == "ws" and not body.get("fcm_token"))):
         return JSONResponse({"error": "invalid body"}, status_code=400)
     # An FCM-only pairing has no bootstrap WebSocket. Its first valid receiver
     # registration claims the code, matching get_or_create in the WS flow.
     p = registry.get_or_create(code)
     if p is None:
         return JSONResponse({"error": "pairing unavailable"}, status_code=401)
-    denial = _secure_http_denial(request, p, "receiver")
+    role = request.headers.get("x-nextnotif-role", "receiver")
+    if role not in ("sender", "receiver"):
+        return JSONResponse({"error": "invalid role"}, status_code=400)
+    if p.token_roles.get(body.get("device_token"), role) != role:
+        return JSONResponse({"error": "credential role mismatch"}, status_code=401)
+    denial = _secure_http_denial(request, p, role)
     if denial is not None:
         return denial
-    _store_fcm_token(p, "receiver", body["fcm_token"])
-    p.delivery["receiver"] = "fcm"
+    _store_fcm_token(p, role, body.get("fcm_token"))
+    p.delivery[role] = "ws" if body.get("delivery_mode") == "ws" else "fcm"
     name = body.get("device_name")
     if isinstance(name, str) and name.strip():
-        p.receiver_name = name.strip()[:64]
+        setattr(p, role + "_name", name.strip()[:64])
     if p.security_mode == "legacy":
         issued = _issue_device_token(p, body.get("device_token"))
     else:
         auth = request.headers.get("authorization") or ""
         issued = request.headers.get(TOKEN_HEADER) or auth[7:]
+    p.token_roles[issued] = role
+    p.token_roles = {t: r for t, r in p.token_roles.items() if t in p.tokens}
     registry.save()
     return {"device_token": issued}
 
@@ -838,6 +862,66 @@ async def pair_status(code: str, request: Request):
         "sender_has_fcm": p.fcm.get("sender") is not None,
         "receiver_has_fcm": p.fcm.get("receiver") is not None,
     }
+
+
+@app.post("/sms-{operation}")
+async def sms_operation(operation: str, request: Request):
+    if operation not in {"submit", "fetch", "result", "status"}:
+        return JSONResponse({"error": "unknown operation"}, status_code=404)
+    code = request.headers.get(CODE_HEADER)
+    p = registry.get(code) if _valid_code(code) else None
+    if p is None:
+        return JSONResponse({"error": "unknown pairing"}, status_code=404)
+    role = "sender" if operation in {"fetch", "result"} else "receiver"
+    denial = _secure_http_denial(request, p, role)
+    if denial is not None:
+        return denial
+    token = request.headers.get(TOKEN_HEADER)
+    if p.security_mode == "legacy" and (token not in p.tokens or p.token_roles.get(token) != role):
+        return JSONResponse({"error": "pairing authorization failed"}, status_code=401)
+    body = _safe_json((await request.body()).decode("utf-8", "replace"))
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+    async with registry.lock:
+        if operation == "fetch" and "sim_options" in body:
+            options = sms_mailbox.sim_options(body["sim_options"])
+            if options is None:
+                return JSONResponse({"error": "invalid SIM options"}, status_code=400)
+            p.sms_sim_options = options
+        if operation == "status" and body.get("request_sims") is True:
+            if p.sender is not None:
+                try:
+                    await p.sender.send_text(json.dumps({"type": "sms_sync", "data": {}}))
+                except Exception:
+                    pass
+            asyncio.get_running_loop().run_in_executor(None, fcm_wake, p, "sender", "sms_request", {}, "sim-options")
+        sms_mailbox.expire(p.sms_commands)
+        if operation == "submit":
+            status, command = sms_mailbox.submit(p.sms_commands, body)
+            if status != 200:
+                return JSONResponse({"error": "Invalid, conflicting, expired or full SMS request"}, status_code=status)
+            registry.save(strict=True)
+            if p.sender is not None:
+                try:
+                    await p.sender.send_text(json.dumps({"type": "sms_sync", "data": {}}))
+                except Exception:
+                    pass
+            asyncio.get_running_loop().run_in_executor(None, fcm_wake, p, "sender", "sms_request", {}, command["id"])
+            return {"command": command}
+        if operation == "result":
+            if not sms_mailbox.update(p.sms_commands, body):
+                return JSONResponse({"error": "invalid result"}, status_code=400)
+            registry.save(strict=True)
+            if p.receiver is not None:
+                try:
+                    await p.receiver.send_text(json.dumps({"type": "sms_sync", "data": {}}))
+                except Exception:
+                    pass
+            asyncio.get_running_loop().run_in_executor(None, fcm_wake, p, "receiver", "sms_status", {}, body["id"])
+            return {"ok": True}
+        registry.save(strict=True)
+        return {"commands": [x for x in p.sms_commands if x["status"] in {"queued", "sending"}]
+                if operation == "fetch" else p.sms_commands, "sim_options": p.sms_sim_options}
 
 
 if __name__ == "__main__":

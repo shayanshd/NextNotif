@@ -32,7 +32,8 @@ NextNotif reuses an existing Android handset and SIM as the gateway instead of r
 
 ## Capabilities and Constraints
 
-- Shipped capabilities include many-to-many pairing, SMS forwarding, incoming-call state and caller-ID forwarding, receiver notifications, offline queues, and reconnect behavior.
+- Shipped capabilities include many-to-many pairing, SMS forwarding and receiver-composed SMS sending through the paired sender SIM, incoming-call state and caller-ID forwarding, receiver notifications, offline queues, and reconnect behavior.
+- SMS sending needs no root. It uses an explicit opt-in and a receiver-selected active sender SIM or the sender phone’s default SMS SIM; receivers can send through FCM and WebSocket-server pairings. Custom Firebase Database transport supports SMS forwarding but not remote SMS commands.
 - The supported baseline is Android 8.0 (API 26) and newer.
 - Ordinary third-party apps cannot assume access to cellular call RX/TX audio.
 - Remote call control and call-audio experiments require explicit user action and device testing.

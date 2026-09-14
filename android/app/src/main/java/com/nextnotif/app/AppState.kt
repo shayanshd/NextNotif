@@ -28,6 +28,8 @@ object AppState {
         val name: String? = null,
         val body: String? = null,
         val callState: String? = null,
+        val smsStatus: String? = null,
+        val smsDetail: String? = null,
     )
 
     data class CallRelayState(

@@ -29,3 +29,6 @@ server-workers/wrangler.fcm-test.jsonc
 .idea/
 *.iml
 .DS_Store
+
+# Local UI review captures
+.impeccable/review/

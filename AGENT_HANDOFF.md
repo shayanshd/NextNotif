@@ -1,6 +1,62 @@
-# NextNotif agent handoff — 2026-09-12
+# NextNotif agent handoff — 2026-09-14
 
 ## Current installed checkpoint (supersedes historical pending notes)
+
+### 2026-09-14 — SMS compose, sender SIM selection, and paused diagnosis
+
+This section supersedes older installation/deployment statements below. Branch: `dev`.
+Owner's latest instruction: stop diagnosis, update roadmap/handoff, commit and push.
+
+Implemented receiver new-message/reply composers, explicit sender SMS opt-in,
+permission-aware modem sending, durable idempotent command queues, carrier callback
+status, and sender SIM discovery/selection. Both Python and Worker relays preserve
+optional immutable `subscription_id`; an unavailable explicit SIM never falls back.
+SIM inventory travels through sender-authenticated `/sms-fetch` and receiver-authenticated
+`/sms-status`, whose `request_sims` flag wakes the sender. FCM carries wake signals only.
+Custom Firebase Database transport still does not support remote SMS sending.
+
+Installed the current debug APK on Samsung SM-A520F sender and Xiaomi 23049PCD8G
+receiver, preserving their existing enabled FCM pairing at `wss://relay.amberdogeorgia.com`.
+Also updated the Samsung Magisk module's NextNotif.apk; its SHA-256 matches the local
+APK (`58335796e9cb8a45f9448e82101632a7c0e00d63edd718ba93d8175a1d13ab91`).
+No reboot was performed. Worker deployed with `wrangler.amber.jsonc` to version
+`482cd705-1a2e-4e85-b297-b26423812be0`; retain the SQLite Durable Object migration.
+
+Validation completed:
+- Android unit tests, debug APK and instrumentation APK builds passed.
+- Python SMS mailbox HTTP tests (5), Worker mailbox tests, and local Worker SMS HTTP
+  integration passed. Full Python/Worker smoke suites also passed earlier in the session,
+  before the SIM extension; focused SIM suites ran after that extension.
+- Emulator selector interaction passed selecting SIM 2 and reverting to sender default.
+  Synthetic fixture captures checked in light/dark (dark at 1.3x text); scoped review passed.
+- `LiveSimOptionsInstrumentedTest` with explicit `liveSimOptions=true` passed on both
+  physical phones. Samsung published two active SIMs; Xiaomi retrieved SIM 1 / CARD 1 /
+  IR-MCI and SIM 2 / CARD 2 / Irancell from the deployed relay. This test only shares SIM
+  metadata and ignores fetched SMS commands; it never sends texts.
+
+Latest failure and stop point:
+- Owner attempted two single-part messages with `subscription_id=2`; sender records
+  have `status=failed` and `part_results={"0":false}`. An earlier stored one-part request
+  has `status=sent`, but its actual default SIM was not recorded.
+- Owner explicitly confirmed Samsung's native Messages app ALSO fails on SIM 2
+  (Irancell). Do not label this a proven relay bug or claim the SIM/carrier cause is fixed.
+  Both SIM states were READY; inspected logs did not reveal the exact carrier cause.
+- `SmsSentReceiver` currently reduces Android's result code to a boolean; radio `errorCode`
+  is not saved. Its PendingIntent is immutable. More detailed result-code capture and
+  accurate single-part failure wording were discussed but NO such edits were made.
+- If work resumes on diagnosis, first isolate the native SIM 2 failure. Consider retaining
+  Android and radio error codes and distinguishing complete vs partial failure. No automatic
+  retransmission, real SMS test, default-SIM change, or balance/SMSC change is authorized by
+  the paused diagnosis. Obtain an explicit recipient/message before agent-initiated sending.
+
+Last device identifiers (rediscover): Samsung USB `52006a98f0ac6489`; Xiaomi Wi-Fi ADB
+`adb-53d75ef-ChIRTM._adb-tls-connect._tcp`. Samsung USB was briefly unstable, then recovered
+when the owner reconnected it. Xiaomi blocks ADB injected taps under its current security
+settings; do not override them. Both apps were reopened normally after live SIM tests.
+Temporary local Worker and emulator from UI validation were stopped. Test APKs remain
+installed. Generated `.impeccable/review/` captures are local-only and ignored by Git.
+
+### Historical checkpoints (read the current section above first)
 
 2026-09-13 TURN implementation checkpoint (supersedes all older pending-TURN notes):
 Cloudflare TURN key ID and issuance token provisioned as encrypted Worker secrets;
