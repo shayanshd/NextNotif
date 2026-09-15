@@ -8,6 +8,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -16,6 +17,26 @@ internal fun phoneAccountMatchesSubscription(accountId: String, subscriptionId: 
     if (accountId == subscriptionId.toString()) return true
     val normalizedIccId = iccId?.takeIf(String::isNotBlank) ?: return false
     return accountId == normalizedIccId || accountId.endsWith(normalizedIccId)
+}
+
+internal fun currentOutgoingCallCommand(commands: JSONArray, requestId: String): JSONObject? =
+    (0 until commands.length()).asSequence().mapNotNull(commands::optJSONObject)
+        .firstOrNull { it.optString("id") == requestId }
+
+internal object OutgoingCallRequestStore {
+    private const val PREFS = "outgoing_call_requests"
+
+    fun current(context: Context, code: String): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(code, null)
+
+    fun set(context: Context, code: String, requestId: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(code, requestId).apply()
+    }
+
+    fun clearIfCurrent(context: Context, code: String, requestId: String) {
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (preferences.getString(code, null) == requestId) preferences.edit().remove(code).apply()
+    }
 }
 
 internal object OutgoingCallRelay {
@@ -51,7 +72,13 @@ internal object OutgoingCallRelay {
         val id = UUID.randomUUID().toString()
         val command = JSONObject().put("id", id).put("to", number)
             .put("subscription_id", subscriptionId ?: JSONObject.NULL).put("created_at", System.currentTimeMillis())
-        post(pairing, "call-submit", command)
+        OutgoingCallRequestStore.set(context, pairing.code, id)
+        try {
+            post(pairing, "call-submit", command)
+        } catch (failure: Throwable) {
+            OutgoingCallRequestStore.clearIfCurrent(context, pairing.code, id)
+            throw failure
+        }
         AppState.updateCall(pairing.code, AppState.CallPhase.CONNECTING, number = number)
         RelayForegroundService.Controller.beginOutgoingCall(context, pairing.code, id, number)
         id
@@ -70,11 +97,17 @@ internal object OutgoingCallRelay {
             }
         } else {
             val commands = post(pairing, "call-status", JSONObject()).getJSONArray("commands")
-            for (i in 0 until commands.length()) {
-                val c = commands.getJSONObject(i)
+            val currentRequest = OutgoingCallRequestStore.current(context, code) ?: return@withContext true
+            currentOutgoingCallCommand(commands, currentRequest)?.let { c ->
                 when (c.optString("status")) {
-                    "failed", "expired" -> AppState.finishCall(code, c.optString("detail", "Sender could not place the call"))
-                    "ended" -> AppState.finishCall(code)
+                    "failed", "expired" -> {
+                        AppState.finishCall(code, c.optString("detail", "Sender could not place the call"))
+                        OutgoingCallRequestStore.clearIfCurrent(context, code, currentRequest)
+                    }
+                    "ended" -> {
+                        AppState.finishCall(code)
+                        OutgoingCallRequestStore.clearIfCurrent(context, code, currentRequest)
+                    }
                 }
             }
         }

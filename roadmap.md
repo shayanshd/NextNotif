@@ -13,6 +13,10 @@ Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
 Checkpoint 2026-09-15 — receiver-initiated outgoing calls (implementation):
 
+- Fixed repeated-call state races: the receiver persists the current request UUID and
+  ignores retained completion records from older calls. Only WebRTC signaling marks
+  receiver audio Connected. A regression test covers old-ended/current-connected order,
+  and the corrected APK is installed on both phones.
 - Samsung SM-A520F follow-up: Telecom prefixes its phone-account IDs before the full
   ICCID. A read-only physical-device probe now verifies one unique ICCID-suffix match
   for each installed SIM; the corrected matcher remains independent of account order.

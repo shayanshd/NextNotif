@@ -4,6 +4,17 @@
 
 ### 2026-09-15 — receiver-initiated outgoing call implementation
 
+Receiver status-race follow-up: repeated physical calls sometimes showed Ended before
+switching to Connected. `/call-status` intentionally retains recent records, but the
+receiver was applying every historical `ended` record to the screen by pairing code.
+The receiver now persists the active outgoing request UUID, applies final mailbox
+status only to that exact request, and clears it conditionally on completion. Cellular
+`connected` mailbox state cannot mark WebRTC audio Connected; the live socket remains
+authoritative. A regression test covers an old ended record preceding the current
+connected record. The corrected APK is installed on both phones and the Samsung Magisk
+copy matches SHA-256
+`5d57c9421fb3963b47fc764a2edd96dc8ac433d574c011c0962ca31b0b6eb16d`.
+
 Samsung follow-up fix: the SM-A520F's Telecom account IDs are its full ICCIDs with
 one OEM prefix character, so the initial exact ID/ICCID matcher rejected both SIMs
 with “Could not match the selected SIM.” A read-only on-device mapping test confirmed

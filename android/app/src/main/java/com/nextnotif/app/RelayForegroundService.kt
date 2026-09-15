@@ -1389,6 +1389,7 @@ class RelayForegroundService : Service() {
         answerRetryJobs.remove(code)?.cancel()
         if (activeCallCode == code) {
             stopCallBridge()
+            outgoingCallRequestId?.let { OutgoingCallRequestStore.clearIfCurrent(this, code, it) }
             outgoingCallRequestId = null
         }
         callMetrics.remove(code)?.let { tracker ->
