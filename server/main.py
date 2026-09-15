@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 import fcm
 import sms_mailbox
+import call_mailbox
 from fcm import wake as fcm_wake
 from secure_pairing import AuthorizationError, MODE as SECURE_MODE, authorize_deletion
 from secure_pairing_store import SecurePairingStore
@@ -50,6 +51,7 @@ class Pairing:
         self.token_roles: dict = {}
         self.sms_commands: list = []
         self.sms_sim_options = None
+        self.call_commands: list = []
         # Sender events uplinked while the receiver was offline, as ready-to-send
         # wire strings, oldest first. Flushed in order on the receiver's (re)connect.
         self.queue: list = [item for item in (queue or []) if isinstance(item, str)]
@@ -121,6 +123,7 @@ class Registry:
                 pairing.token_roles = value.get("token_roles", {})
                 pairing.sms_commands = value.get("sms_commands", [])
                 pairing.sms_sim_options = value.get("sms_sim_options")
+                pairing.call_commands = value.get("call_commands", [])
             pairing.fcm.update(fcm_tokens)
             pairing.delivery.update(delivery)
 
@@ -137,6 +140,7 @@ class Registry:
                                 "token_roles": p.token_roles,
                                 "sms_commands": p.sms_commands,
                                 "sms_sim_options": p.sms_sim_options,
+                                "call_commands": p.call_commands,
                                 "security_mode": p.security_mode,
                                 **({"queue": p.queue} if p.queue else {}),
                                 **({"fcm": p.fcm} if p.fcm else {}),
@@ -922,6 +926,50 @@ async def sms_operation(operation: str, request: Request):
         registry.save(strict=True)
         return {"commands": [x for x in p.sms_commands if x["status"] in {"queued", "sending"}]
                 if operation == "fetch" else p.sms_commands, "sim_options": p.sms_sim_options}
+
+
+@app.post("/call-{operation}")
+async def call_operation(operation: str, request: Request):
+    if operation not in {"submit", "fetch", "result", "status"}:
+        return JSONResponse({"error": "unknown operation"}, status_code=404)
+    code = request.headers.get(CODE_HEADER)
+    p = registry.get(code) if _valid_code(code) else None
+    if p is None:
+        return JSONResponse({"error": "unknown pairing"}, status_code=404)
+    role = "sender" if operation in {"fetch", "result"} else "receiver"
+    denial = _secure_http_denial(request, p, role)
+    if denial is not None:
+        return denial
+    token = request.headers.get(TOKEN_HEADER)
+    if p.security_mode == "legacy" and (token not in p.tokens or p.token_roles.get(token) != role):
+        return JSONResponse({"error": "pairing authorization failed"}, status_code=401)
+    body = _safe_json((await request.body()).decode("utf-8", "replace"))
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+    async with registry.lock:
+        call_mailbox.expire(p.call_commands)
+        if operation == "submit":
+            status, command = call_mailbox.submit(p.call_commands, body)
+            if status != 200:
+                return JSONResponse({"error": "Invalid, conflicting, expired or active call request"}, status_code=status)
+            registry.save(strict=True)
+            if p.sender is not None:
+                try: await p.sender.send_text(json.dumps({"type": "call_sync", "data": {}}))
+                except Exception: pass
+            asyncio.get_running_loop().run_in_executor(None, fcm_wake, p, "sender", "call_request", {}, command["id"])
+            return {"command": command}
+        if operation == "result":
+            if not call_mailbox.update(p.call_commands, body):
+                return JSONResponse({"error": "invalid result"}, status_code=400)
+            registry.save(strict=True)
+            if p.receiver is not None:
+                try: await p.receiver.send_text(json.dumps({"type": "call_sync", "data": {}}))
+                except Exception: pass
+            asyncio.get_running_loop().run_in_executor(None, fcm_wake, p, "receiver", "call_status", {}, body["id"])
+            return {"ok": True}
+        registry.save(strict=True)
+        return {"commands": [x for x in p.call_commands if x["status"] == "queued"]
+                if operation == "fetch" else p.call_commands}
 
 
 if __name__ == "__main__":

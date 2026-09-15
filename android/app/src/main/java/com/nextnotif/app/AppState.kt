@@ -307,7 +307,7 @@ object AppState {
         }
     }
 
-    fun pushOutgoing(type: String, data: JSONObject, code: String? = null) {
+    fun pushOutgoing(type: String, data: JSONObject, code: String? = null, eventId: String? = null) {
         when (type) {
             "sms" -> {
                 val from = data.optString("from")
@@ -345,6 +345,7 @@ object AppState {
                         tag = "OUT",
                         message = "Call $state → $label",
                         code = code,
+                        eventId = eventId,
                         communication = CommunicationDetails(
                             kind = CommunicationKind.CALL,
                             direction = CommunicationDirection.OUTGOING,

@@ -112,6 +112,7 @@ fun HomeScreen(
         (savedMessages + outgoingSms.filterNot { it.optBoolean("hidden") }.map(SmsOutbox::asEntry)).sortedByDescending { it.ts }
     }
     var composingNew by rememberSaveable { mutableStateOf(false) }
+    var composingCall by rememberSaveable { mutableStateOf(false) }
     val connStates by AppState.connStates.collectAsState()
     val partnerStates by AppState.partnerStates.collectAsState()
     val pairingErrors by AppState.pairingErrors.collectAsState()
@@ -149,6 +150,10 @@ fun HomeScreen(
                 .firstOrNull { t -> t.entries.any { it.eventId == "sms-send:$id" } }?.key
             destination = HomeDestination.MESSAGES
         })
+        return
+    }
+    if (composingCall) {
+        NewOutgoingCallScreen(pairings, onBack = { composingCall = false })
         return
     }
 
@@ -277,7 +282,10 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            if (destination == HomeDestination.MESSAGES && conversation == null && pairings.any { it.enabled && it.role == Role.RECEIVER && !it.isFirebase }) {
+            if (destination == HomeDestination.CALLS && pairings.any { it.enabled && it.role == Role.RECEIVER && !it.isFirebase }) {
+                ExtendedFloatingActionButton(onClick = { composingCall = true },
+                    icon = { Icon(Icons.Default.Phone, null) }, text = { Text(stringResource(R.string.outgoing_call_action)) })
+            } else if (destination == HomeDestination.MESSAGES && conversation == null && pairings.any { it.enabled && it.role == Role.RECEIVER && !it.isFirebase }) {
                 ExtendedFloatingActionButton(onClick = { composingNew = true },
                     icon = { Icon(Icons.Default.Edit, null) }, text = { Text(stringResource(R.string.sms_new_message)) })
             } else if (destination == HomeDestination.OVERVIEW) {

@@ -1,6 +1,30 @@
-# NextNotif agent handoff — 2026-09-14
+# NextNotif agent handoff — 2026-09-15
 
 ## Current installed checkpoint (supersedes historical pending notes)
+
+### 2026-09-15 — receiver-initiated outgoing call implementation
+
+The current `dev` checkpoint adds **Calls → Call through sender**. The receiver chooses
+an enabled server-backed sender pairing, destination, and reported SIM. A durable
+two-minute call mailbox wakes the sender; the sender verifies live-call capability
+and CALL_PHONE, maps the subscription exactly to a Telecom phone account, places the call,
+and reuses the current temporary WebRTC audio/hang-up lifecycle. Commands reject
+overlap and keep UUID, destination, and SIM immutable. Outgoing state is returned
+only to the initiating receiver and recorded with outgoing direction.
+
+Python/Node mailbox tests, authenticated HTTP round trips, both full relay smoke suites,
+Android unit tests, debug/test APK builds, and the render-only dialer instrumentation
+test pass. The scoped UI finish review passed after requiring valid SIM inventory and
+removing unsafe positional Telecom-account matching. Worker version
+`d50df604-afe5-45a6-b4b2-d72d99e8dc9a` is deployed to `relay.amberdogeorgia.com`.
+The matched debug APK is installed with data preserved on Samsung SM-A520F sender and
+Xiaomi 23049PCD8G receiver; Samsung was granted CALL_PHONE, RECORD_AUDIO, and
+READ_PHONE_STATE. The Samsung Magisk module APK was also refreshed and matches the
+local artifact (`cd800670134f625d5e0a2fe2c1438cec212df2bcbd01d00e7b04a197097cc121`);
+no reboot was performed. No real call was placed. Physical Xiaomi-to-Samsung validation of
+Samsung account IDs, selected-SIM placement, carrier connection, relayed audio, and
+hang-up remains; unmatched account IDs fail visibly instead of using another SIM.
+
 
 ### 2026-09-14 — SMS compose, sender SIM selection, and paused diagnosis
 

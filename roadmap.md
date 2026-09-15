@@ -11,6 +11,27 @@ Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
 ## MVP execution roadmap (resumed 2026-09-12)
 
+Checkpoint 2026-09-15 — receiver-initiated outgoing calls (implementation):
+
+- Calls now offers **Call through sender** for enabled server-backed receiver
+  pairings. The receiver chooses a destination and a reported sender SIM, then
+  remains in the existing live-call screen for WebRTC audio and hang-up.
+- Added durable authenticated call submit/fetch/result/status mailboxes to Python
+  and Worker relays. Requests expire after two minutes, reject overlap, retain an
+  immutable UUID/SIM selection, and wake the sender through FCM.
+- The sender requires its existing live-call opt-in/root capability plus CALL_PHONE,
+  maps the selected subscription exactly to an Android Telecom phone account, places the
+  cellular call, and reuses the temporary WebRTC bridge. It never falls back to a
+  different SIM. Outgoing call history returns only to the initiating receiver.
+- Pure Python/Node mailbox tests, authenticated HTTP round-trip tests, both full relay
+  smoke suites, Android unit/build/test-APK checks, render instrumentation, and scoped
+  UI finish review pass. Worker version `d50df604-afe5-45a6-b4b2-d72d99e8dc9a` is
+  deployed and the APK is installed on the Xiaomi receiver and Samsung sender.
+  Physical call placement,
+  carrier connection, two-way audio, and hang-up remain to be verified; no call was
+  placed during automated validation.
+
+
 Checkpoint 2026-09-14 — receiver SMS sending and sender SIM selection:
 
 - Receiver composers expose **Sender SIM**, with reported slot, name and carrier,

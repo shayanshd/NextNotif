@@ -656,6 +656,7 @@ class MainActivity : ComponentActivity() {
         liveCallPermMissing.value = if (PermissionPolicy.needsLiveCallPermissions(pairings)) {
             listOf(
                 Manifest.permission.ANSWER_PHONE_CALLS,
+                Manifest.permission.CALL_PHONE,
                 Manifest.permission.RECORD_AUDIO,
             ).filter {
                 ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED

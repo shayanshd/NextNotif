@@ -12,8 +12,11 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
 import android.os.IBinder
+import android.os.Bundle
 import android.os.SystemClock
+import android.net.Uri
 import android.telephony.PhoneStateListener
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.telecom.TelecomManager
@@ -45,6 +48,8 @@ class RelayForegroundService : Service() {
         const val ACTION_FORWARD_CALL = "com.nextnotif.app.FORWARD_CALL"
         const val ACTION_ANSWER_RELAY_CALL = "com.nextnotif.app.ANSWER_RELAY_CALL"
         const val ACTION_END_RELAY_CALL = "com.nextnotif.app.END_RELAY_CALL"
+        const val ACTION_BEGIN_OUTGOING_CALL = "com.nextnotif.app.BEGIN_OUTGOING_CALL"
+        const val ACTION_PLACE_OUTGOING_CALL = "com.nextnotif.app.PLACE_OUTGOING_CALL"
         private const val TAG = "RelayService"
         private val RECONNECT_DELAYS_MS = longArrayOf(2_000L, 5_000L, 10_000L, 30_000L, 60_000L, 120_000L)
         @Volatile private var serviceRunning = false
@@ -95,6 +100,7 @@ class RelayForegroundService : Service() {
     private var pendingStop: Job? = null
     @Volatile private var activeCallCode: String? = null
     @Volatile private var pendingAnswerCode: String? = null
+    @Volatile private var outgoingCallRequestId: String? = null
     @Volatile private var callAudioBridge: WebRtcCallAudioBridge? = null
     @Volatile private var callPeerSession: String? = null
     @Volatile private var callPeerReadySession: String? = null
@@ -212,6 +218,17 @@ class RelayForegroundService : Service() {
             ACTION_END_RELAY_CALL -> {
                 intent.getStringExtra("code")?.let(::endRelayCall)
             }
+            ACTION_BEGIN_OUTGOING_CALL -> beginOutgoingCall(
+                intent.getStringExtra("code") ?: return START_STICKY,
+                intent.getStringExtra("request_id") ?: return START_STICKY,
+                intent.getStringExtra("number") ?: return START_STICKY,
+            )
+            ACTION_PLACE_OUTGOING_CALL -> placeOutgoingCall(
+                intent.getStringExtra("code") ?: return START_STICKY,
+                intent.getStringExtra("request_id") ?: return START_STICKY,
+                intent.getStringExtra("number") ?: return START_STICKY,
+                intent.getIntExtra("subscription_id", -1).takeIf { it >= 0 },
+            )
             else -> {
                 pendingStop?.cancel()
                 started = true
@@ -560,6 +577,10 @@ class RelayForegroundService : Service() {
             SmsRelay.enqueue(this, code)
             return
         }
+        if (evt.type == "call_sync" && code != null) {
+            OutgoingCallRelay.enqueue(this, code)
+            return
+        }
         if (evt.type == "call_control" && code != null) {
             handleCallControl(code, evt.data)
             return
@@ -767,7 +788,15 @@ class RelayForegroundService : Service() {
                 put("ts", timestamp)
                 if (name != null) put("name", name)
             }
-            sendOrQueue("call", payload)
+            val outgoingCode = activeCallCode.takeIf { outgoingCallRequestId != null }
+            val outgoingPairing = outgoingCode?.let { code -> SessionStore.load(this@RelayForegroundService).pairings
+                .firstOrNull { it.code == code && it.role == Role.SENDER && it.enabled } }
+            if (outgoingPairing != null) {
+                payload.put("direction", "outgoing")
+                if (!sendToPairing(outgoingPairing, "call", payload)) {
+                    OutboxQueue.enqueue(this@RelayForegroundService, outgoingPairing.code, "call", payload)
+                }
+            } else sendOrQueue("call", payload)
         }
     }
 
@@ -847,6 +876,9 @@ class RelayForegroundService : Service() {
         forwardCall(finalNumber, stateStr, System.currentTimeMillis(), name)
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
+                outgoingCallRequestId?.let { requestId ->
+                    activeCallCode?.let { code -> reportOutgoingCall(code, requestId, "connected") }
+                }
                 activeCallCode?.let { code ->
                     val pairing = session.pairings.firstOrNull {
                         it.code == code && it.role == Role.SENDER && it.enabled &&
@@ -864,6 +896,8 @@ class RelayForegroundService : Service() {
             }
             TelephonyManager.CALL_STATE_IDLE -> {
                 val active = activeCallCode
+                outgoingCallRequestId?.let { requestId -> active?.let { reportOutgoingCall(it, requestId, "ended") } }
+                outgoingCallRequestId = null
                 active?.let { code ->
                     sockets[code]?.send("call_control", JSONObject().put("action", "ended"))
                 }
@@ -1047,6 +1081,77 @@ class RelayForegroundService : Service() {
     private fun canControlPhoneCalls(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS) ==
             PackageManager.PERMISSION_GRANTED
+
+    @Synchronized
+    private fun beginOutgoingCall(code: String, requestId: String, number: String) {
+        if (activeCallCode != null) return
+        val pairing = SessionStore.load(this).pairings.firstOrNull {
+            it.code == code && it.role == Role.RECEIVER && it.enabled && !it.isFirebase
+        } ?: return
+        activeCallCode = code
+        outgoingCallRequestId = requestId
+        AppState.updateCall(code, AppState.CallPhase.CONNECTING, number = number)
+        openTemporaryCallSocket(pairing)
+    }
+
+    @Synchronized
+    private fun placeOutgoingCall(code: String, requestId: String, number: String, subscriptionId: Int?) {
+        val pairing = SessionStore.load(this).pairings.firstOrNull {
+            it.code == code && it.role == Role.SENDER && it.enabled && !it.isFirebase
+        } ?: return
+        if (outgoingCallRequestId == requestId) return
+        if (activeCallCode != null) {
+            reportOutgoingCall(code, requestId, "failed", "Sender phone is already handling another relayed call")
+            return
+        }
+        val denial = liveCallDenial(pairing)
+            ?: if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED)
+                "Allow Phone permission on the sender to place calls" else null
+        if (denial != null) {
+            reportOutgoingCall(code, requestId, "failed", denial)
+            return
+        }
+        val subscription = selectSmsSubscription(subscriptionId,
+            getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList.orEmpty().map { it.subscriptionId },
+            SubscriptionManager.getDefaultVoiceSubscriptionId())
+        if (subscription == null) {
+            reportOutgoingCall(code, requestId, "failed", "Selected SIM is unavailable on the sender")
+            return
+        }
+        if (lastCallState != null && lastCallState != TelephonyManager.CALL_STATE_IDLE) {
+            reportOutgoingCall(code, requestId, "failed", "Sender phone is already in a call")
+            return
+        }
+        activeCallCode = code
+        outgoingCallRequestId = requestId
+        currentCallNumber = number
+        openTemporaryCallSocket(pairing)
+        val telecom = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+        val accounts = telecom.callCapablePhoneAccounts
+        val selectedInfo = getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList.orEmpty()
+            .firstOrNull { it.subscriptionId == subscription }
+        val authoritativeIds = setOfNotNull(subscription.toString(), selectedInfo?.iccId?.takeIf(String::isNotBlank))
+        val handle = accounts.singleOrNull { it.id in authoritativeIds }
+        if (handle == null) {
+            reportOutgoingCall(code, requestId, "failed", "Could not match the selected SIM to a calling account")
+            completeLiveCall(code, "dial_failed")
+            return
+        }
+        val extras = Bundle().putParcelableCompat(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
+        runCatching { telecom.placeCall(Uri.fromParts("tel", number, null), extras) }
+            .onSuccess { reportOutgoingCall(code, requestId, "dialing") }
+            .onFailure {
+                reportOutgoingCall(code, requestId, "failed", it.message ?: "Sender could not place the call")
+                completeLiveCall(code, "dial_failed")
+            }
+    }
+
+    private fun Bundle.putParcelableCompat(key: String, value: android.os.Parcelable): Bundle = apply { putParcelable(key, value) }
+
+    private fun reportOutgoingCall(code: String, requestId: String, status: String, detail: String = "") {
+        val pairing = SessionStore.load(this).pairings.firstOrNull { it.code == code && it.role == Role.SENDER } ?: return
+        scope.launch { runCatching { OutgoingCallRelay.report(this@RelayForegroundService, pairing, requestId, status, detail) } }
+    }
 
     private fun liveCallDenial(pairing: PairingInfo): String? {
         if (pairing.role != Role.SENDER || !pairing.enabled || !pairing.liveCallEnabled) {
@@ -1283,6 +1388,7 @@ class RelayForegroundService : Service() {
         answerRetryJobs.remove(code)?.cancel()
         if (activeCallCode == code) {
             stopCallBridge()
+            outgoingCallRequestId = null
         }
         callMetrics.remove(code)?.let { tracker ->
             val summary = tracker.finish(reason).logLine()
@@ -1596,6 +1702,15 @@ class RelayForegroundService : Service() {
 
         fun endCall(ctx: Context, code: String) {
             start(ctx, ACTION_END_RELAY_CALL, arrayOf("code" to code))
+        }
+
+        fun beginOutgoingCall(ctx: Context, code: String, requestId: String, number: String) {
+            start(ctx, ACTION_BEGIN_OUTGOING_CALL, arrayOf("code" to code, "request_id" to requestId, "number" to number))
+        }
+
+        fun placeOutgoingCall(ctx: Context, code: String, requestId: String, number: String, subscriptionId: Int?) {
+            start(ctx, ACTION_PLACE_OUTGOING_CALL, arrayOf("code" to code, "request_id" to requestId,
+                "number" to number, "subscription_id" to subscriptionId))
         }
 
         internal fun requiresPersistentService(ctx: Context): Boolean {

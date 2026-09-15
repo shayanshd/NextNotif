@@ -46,6 +46,17 @@ async def main():
             json={'fcm_token': 'local-test-fcm-token-sender', 'device_token': tokens['receiver']})
         assert wrong.status_code == 401
         assert (await post('submit', 'receiver', dict(command, id=str(uuid.uuid4()), created_at=1))).status_code == 400
+        async def call_post(op, role, body=None):
+            return await client.post('/call-' + op, headers={'X-NextNotif-Code': code,
+                'X-NextNotif-Token': tokens.get(role, 'bad')}, json=body or {})
+        call = {'id': str(uuid.uuid4()), 'to': '+15551234567', 'subscription_id': 12,
+            'created_at': int(time.time()*1000)}
+        assert (await call_post('submit', 'sender', call)).status_code == 401
+        assert (await call_post('submit', 'receiver', call)).status_code == 200
+        assert (await call_post('fetch', 'sender')).json()['commands'][0]['subscription_id'] == 12
+        assert (await call_post('result', 'receiver', {'id': call['id'], 'status': 'connected'})).status_code == 401
+        assert (await call_post('result', 'sender', {'id': call['id'], 'status': 'connected'})).status_code == 200
+        assert (await call_post('status', 'receiver')).json()['commands'][0]['status'] == 'connected'
         # A healthy WebSocket must be sufficient even without an FCM token.
         ws_code = str(secrets.randbelow(900000) + 100000)
         ws_tokens = {}

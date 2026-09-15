@@ -70,6 +70,7 @@ class NextNotifMessagingService : FirebaseMessagingService() {
         Log.i("NextNotifFCM", "FCM message received (keys=${message.data.keys.sorted()})")
         if (message.data["nn"] == "1") {
             SmsRelay.handlePush(this, message.data)
+            OutgoingCallRelay.handlePush(this, message.data)
             if (!FcmOnDemand.handlePush(this, message.data)) {
                 RelayForegroundService.Controller.start(this)
             }

@@ -52,7 +52,7 @@
     <string name="setup_contacts_dialog_title">Use saved caller names?</string>
     <string name="setup_contacts_dialog_body">NextNotif will look up incoming numbers in contacts on this sender phone and include a matching name. Contact access is optional—unknown numbers and all call updates still forward without it.</string>
     <string name="live_call_perm_title">Allow live call controls?</string>
-    <string name="live_call_perm_body">Live call relay needs permission to answer calls on this sender and use its microphone for two-way audio. These permissions are optional—SMS and incoming-call alerts keep working without them.</string>
+    <string name="live_call_perm_body">Live call relay needs permission to place and answer calls on this sender and use its microphone for two-way audio. These permissions are optional—SMS and incoming-call alerts keep working without them.</string>
     <string name="live_call_perm_allow">Allow live calls</string>
     <string name="live_call_perm_not_now">Not now</string>
     <string name="live_call_perm_denied_title">Live calls still need permission</string>
@@ -320,4 +320,10 @@
     <string name="sms_sim_last_reported">Last reported by the sender. Refresh after changing SIMs.</string>
     <string name="sms_sim_current_default">Reported default: SIM %1$s</string>
     <string name="sms_sim_refresh">Refresh SIMs</string>
+    <string name="outgoing_call_title">New call</string>
+    <string name="outgoing_call_action">Call through sender</string>
+    <string name="outgoing_call_starting">Starting call…</string>
+    <string name="outgoing_call_notice">The sender places a cellular call using the selected SIM. Carrier call charges apply. Keep this screen open for relayed audio.</string>
+    <string name="outgoing_call_microphone">Allow Microphone on the receiver to use relayed call audio.</string>
+    <string name="outgoing_call_failed">The sender could not start the call.</string>
 </resources>

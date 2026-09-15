@@ -1,4 +1,5 @@
 import { submitSms, updateSms, expireSms, simOptions } from './sms-mailbox.mjs';
+import { submitCall, updateCall, expireCalls } from './call-mailbox.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import { cloudflareIceServers, consumeIceBudget } from './turn-credentials.mjs';
 import { SecurePairingStore } from './secure-pairing-store.mjs';
@@ -312,10 +313,10 @@ export class RelayPairing extends DurableObject {
     return issued;
   }
 
-  signalSmsSync(role) {
+  signalSmsSync(role, type = 'sms_sync') {
     const socket = this.liveSockets()[role];
     if (socket) {
-      try { socket.send(JSON.stringify({type: 'sms_sync', data: {}})); } catch { /* reconnect sync catches up */ }
+      try { socket.send(JSON.stringify({type, data: {}})); } catch { /* reconnect sync catches up */ }
     }
   }
 
@@ -459,6 +460,7 @@ export class RelayPairing extends DurableObject {
     const parts = url.pathname.split('/').filter(Boolean);
     const operation = parts[0];
     const smsOperation = ['sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(operation);
+    const callOperation = ['call-submit', 'call-fetch', 'call-result', 'call-status'].includes(operation);
     const requestedRole = request.headers.get('X-NextNotif-Role') || 'receiver';
     if (!['sender', 'receiver'].includes(requestedRole)) return Response.json({error: 'invalid role'}, {status: 400});
     let secure = false;
@@ -467,8 +469,8 @@ export class RelayPairing extends DurableObject {
         // Secure WS support follows HTTP guards. Until then deny before slot
         // replacement, pending metadata, or legacy token minting can occur.
         if (await this.securityMode() !== 'legacy') throw new AuthorizationError();
-      } else if (smsOperation || operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
-        secure = await this.authorizeHttp(request, operation === 'send' || ['sms-fetch', 'sms-result'].includes(operation) ? 'sender' : operation === 'fcm-register' ? requestedRole : ['status', 'ice'].includes(operation) ? null : 'receiver');
+      } else if (smsOperation || callOperation || operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
+        secure = await this.authorizeHttp(request, operation === 'send' || ['sms-fetch', 'sms-result', 'call-fetch', 'call-result'].includes(operation) ? 'sender' : operation === 'fcm-register' ? requestedRole : ['status', 'ice'].includes(operation) ? null : 'receiver');
       }
     } catch (error) {
       if (!(error instanceof AuthorizationError)) throw error;
@@ -515,6 +517,35 @@ export class RelayPairing extends DurableObject {
       return Response.json({commands: operation === 'sms-fetch'
         ? records.filter(x => ['queued', 'sending'].includes(x.status)) : records,
         sim_options: (await this.state.storage.get('smsSimOptions')) ?? null});
+    }
+
+    if (callOperation && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
+      this.code = parts[1];
+      const role = ['call-fetch', 'call-result'].includes(operation) ? 'sender' : 'receiver';
+      const token = request.headers.get('X-NextNotif-Token');
+      const roles = (await this.state.storage.get('tokenRoles')) || {};
+      if (!secure && (!token || roles[token] !== role || !(await this.getTokens()).includes(token)))
+        return Response.json({error: 'pairing authorization failed'}, {status: 401});
+      let body = {};
+      try { body = await request.json(); } catch { return Response.json({error: 'invalid body'}, {status: 400}); }
+      let records = expireCalls((await this.state.storage.get('callCommands')) || []);
+      if (operation === 'call-submit') {
+        const result = submitCall(records, body);
+        if (result.status !== 200) return Response.json({error: 'invalid or active call request'}, {status: result.status});
+        await this.state.storage.put('callCommands', result.records);
+        this.signalSmsSync('sender', 'call_sync');
+        this.state.waitUntil(this.maybeFcmWake('sender', {type: 'call_request'}));
+        return Response.json({command: result.command});
+      }
+      if (operation === 'call-result' && !updateCall(records, body))
+        return Response.json({error: 'invalid result'}, {status: 400});
+      await this.state.storage.put('callCommands', records);
+      if (operation === 'call-result') {
+        this.signalSmsSync('receiver', 'call_sync');
+        this.state.waitUntil(this.maybeFcmWake('receiver', {type: 'call_status'}));
+        return Response.json({ok: true});
+      }
+      return Response.json({commands: operation === 'call-fetch' ? records.filter(x => x.status === 'queued') : records});
     }
 
     if (operation === 'ice' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
@@ -936,7 +967,8 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 1 &&
-      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(parts[0])
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
+        'call-submit', 'call-fetch', 'call-result', 'call-status'].includes(parts[0])
     ) {
       if (!isValidCode(headerCode)) {
         return Response.json({ error: 'missing pairing code' }, { status: 400 });
@@ -947,7 +979,8 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 2 &&
-      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(parts[0])
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
+        'call-submit', 'call-fetch', 'call-result', 'call-status'].includes(parts[0])
     ) {
       const code = isValidCode(headerCode) ? headerCode : parts[1];
       if (!isValidCode(code)) return new Response('Not found', { status: 404 });

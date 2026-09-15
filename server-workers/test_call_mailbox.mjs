@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {submitCall, updateCall, expireCalls, validCall, CALL_TTL_MS} from './src/call-mailbox.mjs';
+const now = 1000000;
+const command = {id: '00000000-0000-4000-8000-000000000001', to: '+15551234567', subscription_id: 12, created_at: now};
+let result = submitCall([], command, now);
+assert.equal(result.status, 200);
+assert.equal(submitCall(result.records, command, now).status, 200);
+assert.equal(submitCall(result.records, {...command, subscription_id: 7}, now).status, 409);
+assert.equal(submitCall(result.records, {...command, id: '00000000-0000-4000-8000-000000000002'}, now).status, 409);
+assert.equal(updateCall(result.records, {id: command.id, status: 'ended'}), true);
+assert.equal(submitCall(result.records, {...command, id: '00000000-0000-4000-8000-000000000002'}, now).status, 200);
+for (const subscription_id of [-1, true, '12', 1.5, 2147483648]) assert.equal(validCall({...command, subscription_id}, now), false);
+result = submitCall([], command, now);
+result.records = expireCalls(result.records, now + CALL_TTL_MS);
+assert.equal(result.records[0].status, 'expired');
+updateCall(result.records, {id: command.id, status: 'connected'});
+assert.equal(result.records[0].status, 'expired');
+console.log('Outgoing call mailbox validation, exclusivity, expiry and immutable SIM selection passed');

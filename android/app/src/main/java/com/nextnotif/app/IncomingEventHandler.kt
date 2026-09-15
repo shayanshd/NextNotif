@@ -36,6 +36,10 @@ object IncomingEventHandler {
         } else null
         val name = localName ?: remoteName
         if (name != null) data.put("name", name)
+        if (type == "call" && data.optString("direction") == "outgoing") {
+            AppState.pushOutgoing(type, data, code, eventId)
+            return true
+        }
         if (type == "call" && code != null) {
             IncomingCallOfferStore.observe(context, code, data.optString("state"), interactiveLiveCallAvailable(data),
                 callOfferTimestamp(data), number.takeIf { it.isNotBlank() }, name)

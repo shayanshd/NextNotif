@@ -102,13 +102,21 @@ Samsung A5 mixer uplink. **Hang up** and call/disconnect cleanup stop both audio
 pipelines, restore `AudioMixer CH2 DOUT Select` to `AIF4IN`, close the temporary
 sockets, and return event delivery to FCM.
 
+The receiver can also open **Calls → Call through sender**, choose the paired
+sender, enter a number, and select one of the sender's reported SIMs. The relay
+wakes the sender, which places the cellular call with Android Telecom and joins
+the same temporary WebRTC audio session. Only one outgoing request may be active
+per pairing; its UUID and SIM selection are immutable, and requests expire after
+two minutes. The sender must have Phone, Microphone, and direct-call permissions,
+plus the existing rooted gateway capability. Carrier voice charges apply.
+
 Requirements and current limits:
 
 - The gateway is the tested rooted Samsung SM-A520F (Android 8), installed as a
   Magisk privileged app with `CAPTURE_AUDIO_OUTPUT` and the supplied persistent
   audio-device SELinux rule/mixer helper.
 - The receiver is a normal Android phone with microphone permission.
-- The sender needs Android's answer-call permission for remote Answer/Hang up. These
+- The sender needs Android's phone permissions for remote Place/Answer/Hang up. These
   live-call permissions are optional and do not block the core relay.
 - FCM carries event delivery and the call wake-up. Temporary TLS WebSockets carry
   live signaling/audio; no receiver WebSocket remains open between calls.
