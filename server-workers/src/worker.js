@@ -472,8 +472,8 @@ export class RelayPairing extends DurableObject {
         // Secure WS support follows HTTP guards. Until then deny before slot
         // replacement, pending metadata, or legacy token minting can occur.
         if (await this.securityMode() !== 'legacy') throw new AuthorizationError();
-      } else if (smsOperation || callOperation || operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
-        secure = await this.authorizeHttp(request, operation === 'send' || ['sms-fetch', 'sms-result', 'call-fetch', 'call-result'].includes(operation) ? 'sender' : operation === 'fcm-register' ? requestedRole : ['status', 'ice'].includes(operation) ? null : 'receiver');
+      } else if (smsOperation || callOperation || operation === 'battery-status' || operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
+        secure = await this.authorizeHttp(request, operation === 'send' || operation === 'battery-status' || ['sms-fetch', 'sms-result', 'call-fetch', 'call-result'].includes(operation) ? 'sender' : operation === 'fcm-register' ? requestedRole : ['status', 'ice'].includes(operation) ? null : 'receiver');
       }
     } catch (error) {
       if (!(error instanceof AuthorizationError)) throw error;
@@ -520,6 +520,17 @@ export class RelayPairing extends DurableObject {
       return Response.json({commands: operation === 'sms-fetch'
         ? records.filter(x => ['queued', 'sending'].includes(x.status)) : records,
         sim_options: (await this.state.storage.get('smsSimOptions')) ?? null});
+    }
+
+    if (operation === 'battery-status' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
+      if (requestedRole !== 'sender') return Response.json({error: 'pairing authorization failed'}, {status: 401});
+      let body = {};
+      try { body = await request.json(); } catch { return Response.json({error: 'invalid body'}, {status: 400}); }
+      const battery = body && Number.isInteger(body.battery_percent) && body.battery_percent >= 0 && body.battery_percent <= 100
+        ? body.battery_percent : null;
+      if (battery == null) return Response.json({error: 'invalid battery percentage'}, {status: 400});
+      await this.state.storage.put('batteries', {...((await this.state.storage.get('batteries')) || {}), sender: battery});
+      return Response.json({ok: true});
     }
 
     if (callOperation && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
@@ -988,7 +999,7 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 1 &&
-      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'battery-status', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
         'call-submit', 'call-fetch', 'call-result', 'call-status', 'call-cancel'].includes(parts[0])
     ) {
       if (!isValidCode(headerCode)) {
@@ -1000,7 +1011,7 @@ export default {
     if (
       request.method === 'POST' &&
       parts.length === 2 &&
-      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
+      ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'battery-status', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
         'call-submit', 'call-fetch', 'call-result', 'call-status', 'call-cancel'].includes(parts[0])
     ) {
       const code = isValidCode(headerCode) ? headerCode : parts[1];

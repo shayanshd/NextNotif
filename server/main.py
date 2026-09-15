@@ -883,6 +883,24 @@ async def pair_status(code: str, request: Request):
         "receiver_has_fcm": p.fcm.get("receiver") is not None,
     }
 
+@app.post("/battery-status")
+async def battery_status(request: Request):
+    code = request.headers.get(CODE_HEADER)
+    p = registry.get(code) if _valid_code(code) else None
+    if p is None: return JSONResponse({"error": "unknown pairing"}, status_code=404)
+    denial = _secure_http_denial(request, p, "sender")
+    if denial is not None: return denial
+    token = request.headers.get(TOKEN_HEADER)
+    if p.security_mode == "legacy" and (token not in p.tokens or p.token_roles.get(token) != "sender"):
+        return JSONResponse({"error": "pairing authorization failed"}, status_code=401)
+    body = _safe_json((await request.body()).decode("utf-8", "replace"))
+    battery = body.get("battery_percent") if isinstance(body, dict) else None
+    if not isinstance(battery, int) or isinstance(battery, bool) or not 0 <= battery <= 100:
+        return JSONResponse({"error": "invalid battery percentage"}, status_code=400)
+    p.sender_battery = battery
+    registry.save(strict=True)
+    return {"ok": True}
+
 
 @app.post("/sms-{operation}")
 async def sms_operation(operation: str, request: Request):

@@ -16,6 +16,8 @@ Checkpoint 2026-09-15 — receiver-initiated outgoing calls (implementation):
 - Sender battery percentage is advertised and refreshed through relay status. The
   receiver shows the latest percentage and posts one low-battery notification when
   the sender drops below 20%; the alert resets after charging back to 20%.
+- FCM-only pairings now publish battery through an authenticated HTTP heartbeat;
+  battery monitoring no longer depends on a persistent WebSocket.
 
 - Sender telephony handling now debounces a transient Samsung `IDLE` callback
   between `placeCall` and `OFFHOOK`, preventing a premature ended state on the receiver.

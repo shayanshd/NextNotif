@@ -739,6 +739,7 @@ class RelayForegroundService : Service() {
             val http = p.server.replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
             withContext(Dispatchers.IO) {
                 runCatching {
+                    if (p.role == Role.SENDER) postBatteryStatus(p)
                     val conn = URL("$http/pair/${p.code}/status").openConnection() as HttpURLConnection
                     conn.requestMethod = "GET"
                     conn.connectTimeout = 3000
@@ -758,6 +759,24 @@ class RelayForegroundService : Service() {
                 }.onFailure { Log.w(TAG, "partner status poll failed for ${p.code}: ${it.message}") }
             }
         }
+    }
+
+    private fun postBatteryStatus(pairing: PairingInfo) {
+        val battery = (getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager)
+            ?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: return
+        if (battery !in 0..100 || pairing.deviceToken == null) return
+        val http = pairing.server.replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
+        val conn = URL("$http/battery-status").openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.connectTimeout = 3000
+        conn.readTimeout = 3000
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("X-NextNotif-Code", pairing.code)
+        conn.setRequestProperty("X-NextNotif-Role", "sender")
+        conn.setRequestProperty("X-NextNotif-Token", pairing.deviceToken)
+        conn.outputStream.use { it.write(JSONObject().put("battery_percent", battery).toString().toByteArray()) }
+        conn.inputStream.close()
     }
 
     private fun notifyLowSenderBattery(pairing: PairingInfo, battery: Int?) {

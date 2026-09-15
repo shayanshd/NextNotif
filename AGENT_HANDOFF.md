@@ -12,6 +12,10 @@ installed. Xiaomi was offline during this install and needs the APK installed wh
 it reconnects.
 The battery percentage is now also shown directly on the receiver Home pairing card;
 the latest APK is installed on both phones.
+FCM-only battery reporting was then corrected with a sender-authenticated
+`/battery-status` HTTP endpoint and periodic sender polling. Worker version
+`56286d69-ab26-468c-ac74-6c3a88dff283` is deployed. Samsung received the latest APK;
+Xiaomi disconnected before this final install and needs it installed when it returns.
 
 Latest fix: Samsung can emit a transient telephony `IDLE` between `placeCall` and
 `OFFHOOK`. Sender teardown now waits 2.5 seconds for `OFFHOOK` before reporting an
