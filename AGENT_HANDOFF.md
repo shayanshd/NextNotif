@@ -38,16 +38,17 @@ Latest failure and stop point:
 - Owner attempted two single-part messages with `subscription_id=2`; sender records
   have `status=failed` and `part_results={"0":false}`. An earlier stored one-part request
   has `status=sent`, but its actual default SIM was not recorded.
-- Owner explicitly confirmed Samsung's native Messages app ALSO fails on SIM 2
-  (Irancell). Do not label this a proven relay bug or claim the SIM/carrier cause is fixed.
-  Both SIM states were READY; inspected logs did not reveal the exact carrier cause.
+- Owner explicitly confirmed Samsung's native Messages app ALSO initially failed on
+  SIM 2 (Irancell), then reported that the operator fixed the problem. This was not
+  a NextNotif coding issue. Both SIM states were READY.
 - `SmsSentReceiver` currently reduces Android's result code to a boolean; radio `errorCode`
   is not saved. Its PendingIntent is immutable. More detailed result-code capture and
   accurate single-part failure wording were discussed but NO such edits were made.
-- If work resumes on diagnosis, first isolate the native SIM 2 failure. Consider retaining
-  Android and radio error codes and distinguishing complete vs partial failure. No automatic
-  retransmission, real SMS test, default-SIM change, or balance/SMSC change is authorized by
-  the paused diagnosis. Obtain an explicit recipient/message before agent-initiated sending.
+- If work resumes, consider retaining Android and radio error codes and distinguishing
+  complete vs partial failure. The operator-side SIM 2 issue is resolved; no automatic
+  retransmission, real SMS test, default-SIM change, or balance/SMSC change is authorized
+  without an explicit request. Obtain an explicit recipient/message before agent-initiated
+  sending.
 
 Last device identifiers (rediscover): Samsung USB `52006a98f0ac6489`; Xiaomi Wi-Fi ADB
 `adb-53d75ef-ChIRTM._adb-tls-connect._tcp`. Samsung USB was briefly unstable, then recovered

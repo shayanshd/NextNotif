@@ -35,17 +35,17 @@ Checkpoint 2026-09-14 — receiver SMS sending and sender SIM selection:
   and Xiaomi reads SIM 1 / CARD 1 / IR-MCI and SIM 2 / CARD 2 / Irancell through the
   deployed relay. Tests share only SIM metadata and never process/send SMS commands.
 - Owner subsequently attempted two single-part sends with `subscription_id=2`;
-  Samsung recorded both as failed. Owner confirmed Samsung's normal Messages app
-  also fails on SIM 2 (Irancell). This indicates a SIM/carrier/device sending issue
-  independent of NextNotif; the exact cause is not established. Both SIMs report READY.
+  Samsung recorded both as failed. Samsung's normal Messages app also initially
+  failed on SIM 2 (Irancell), and the owner has since fixed that operator-side issue.
+  This was not a NextNotif coding issue. Both SIMs report READY.
 - An earlier stored one-part request has a successful carrier callback. This does not
   establish successful sending on both SIMs. No SMS was sent or retried by the agent.
 - Current callback handling stores only success/failure, discarding Android's specific
-  result/radio error codes. The generic partial-send wording is misleading for a
-  single-part failure. Richer error reporting was proposed but NOT implemented.
+  result/radio error codes. Richer error reporting was proposed but NOT implemented;
+  this is a future diagnostic improvement, not a fix required for the operator issue.
 - Owner paused diagnosis and requested commit/push plus roadmap and handoff updates.
-  Next: investigate SIM 2's native Messages failure if requested; preserve failed
-  request IDs and never automatically retry uncertain or failed carrier sends.
+  SIM 2 is now fixed by the operator; preserve failed request IDs and never
+  automatically retry uncertain or failed carrier sends.
 
 
 Latest checkpoint 2026-09-13 (overrides historical TURN pending/billing notes below):
