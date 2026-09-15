@@ -12,6 +12,12 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
+internal fun phoneAccountMatchesSubscription(accountId: String, subscriptionId: Int, iccId: String?): Boolean {
+    if (accountId == subscriptionId.toString()) return true
+    val normalizedIccId = iccId?.takeIf(String::isNotBlank) ?: return false
+    return accountId == normalizedIccId || accountId.endsWith(normalizedIccId)
+}
+
 internal object OutgoingCallRelay {
     private val client = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).build()
     private val json = "application/json".toMediaType()

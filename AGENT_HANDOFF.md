@@ -4,6 +4,15 @@
 
 ### 2026-09-15 — receiver-initiated outgoing call implementation
 
+Samsung follow-up fix: the SM-A520F's Telecom account IDs are its full ICCIDs with
+one OEM prefix character, so the initial exact ID/ICCID matcher rejected both SIMs
+with “Could not match the selected SIM.” A read-only on-device mapping test confirmed
+each subscription uniquely matches the full ICCID suffix. The matcher now accepts
+that authoritative Samsung form without positional fallback; the test passes for
+both installed SIMs. The corrected APK is installed on both phones and the Samsung
+Magisk copy matches SHA-256
+`5daa33cbc7d5bfa99fa82625c18a26e17510cec6beb2bcd26bac4dd965bc5170`.
+
 The current `dev` checkpoint adds **Calls → Call through sender**. The receiver chooses
 an enabled server-backed sender pairing, destination, and reported SIM. A durable
 two-minute call mailbox wakes the sender; the sender verifies live-call capability
@@ -20,7 +29,7 @@ removing unsafe positional Telecom-account matching. Worker version
 The matched debug APK is installed with data preserved on Samsung SM-A520F sender and
 Xiaomi 23049PCD8G receiver; Samsung was granted CALL_PHONE, RECORD_AUDIO, and
 READ_PHONE_STATE. The Samsung Magisk module APK was also refreshed and matches the
-local artifact (`cd800670134f625d5e0a2fe2c1438cec212df2bcbd01d00e7b04a197097cc121`);
+local artifact (superseded by the Samsung mapping fix hash above);
 no reboot was performed. No real call was placed. Physical Xiaomi-to-Samsung validation of
 Samsung account IDs, selected-SIM placement, carrier connection, relayed audio, and
 hang-up remains; unmatched account IDs fail visibly instead of using another SIM.

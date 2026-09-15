@@ -13,6 +13,10 @@ Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
 Checkpoint 2026-09-15 — receiver-initiated outgoing calls (implementation):
 
+- Samsung SM-A520F follow-up: Telecom prefixes its phone-account IDs before the full
+  ICCID. A read-only physical-device probe now verifies one unique ICCID-suffix match
+  for each installed SIM; the corrected matcher remains independent of account order.
+  The corrected APK is installed on both Samsung and Xiaomi.
 - Calls now offers **Call through sender** for enabled server-backed receiver
   pairings. The receiver chooses a destination and a reported sender SIM, then
   remains in the existing live-call screen for WebRTC audio and hang-up.

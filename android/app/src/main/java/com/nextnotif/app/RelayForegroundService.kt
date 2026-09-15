@@ -1130,8 +1130,9 @@ class RelayForegroundService : Service() {
         val accounts = telecom.callCapablePhoneAccounts
         val selectedInfo = getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList.orEmpty()
             .firstOrNull { it.subscriptionId == subscription }
-        val authoritativeIds = setOfNotNull(subscription.toString(), selectedInfo?.iccId?.takeIf(String::isNotBlank))
-        val handle = accounts.singleOrNull { it.id in authoritativeIds }
+        val handle = accounts.singleOrNull {
+            phoneAccountMatchesSubscription(it.id, subscription, selectedInfo?.iccId)
+        }
         if (handle == null) {
             reportOutgoingCall(code, requestId, "failed", "Could not match the selected SIM to a calling account")
             completeLiveCall(code, "dial_failed")
