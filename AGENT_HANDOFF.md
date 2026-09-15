@@ -11,6 +11,8 @@ authenticated cancel operation, then retries the same UUID, destination, and SIM
 active calls are never force-cancelled. Python/Node tests cover cancellation and
 the Android debug/unit/test APK build passes. Returned-contact selection was not
 completed on the emulator because it has no usable Contacts handler.
+Worker version `336a5ddf-1ac9-4808-8c3a-1b82b0a7ba9b` is deployed, and the rebuilt
+APK is installed on both phones.
 
 Receiver status-race follow-up: repeated physical calls sometimes showed Ended before
 switching to Connected. `/call-status` intentionally retains recent records, but the

@@ -39,6 +39,8 @@ Checkpoint 2026-09-15 — receiver-initiated outgoing calls (implementation):
   smoke suites, Android unit/build/test-APK checks, render instrumentation, and scoped
   UI finish review pass. Worker version `d50df604-afe5-45a6-b4b2-d72d99e8dc9a` is
   deployed and the APK is installed on the Xiaomi receiver and Samsung sender.
+  Worker follow-up version `336a5ddf-1ac9-4808-8c3a-1b82b0a7ba9b` includes stale-call
+  cancellation recovery.
   Physical call placement,
   carrier connection, two-way audio, and hang-up remain to be verified; no call was
   placed during automated validation.
