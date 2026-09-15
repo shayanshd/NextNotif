@@ -4,6 +4,12 @@
 
 ### 2026-09-15 — receiver-initiated outgoing call implementation
 
+Latest fix: Samsung can emit a transient telephony `IDLE` between `placeCall` and
+`OFFHOOK`. Sender teardown now waits 2.5 seconds for `OFFHOOK` before reporting an
+outgoing call ended, while real post-call `IDLE` remains immediate. Android unit
+tests and debug build pass; the APK is installed on both phones and Samsung's
+privileged copy was refreshed.
+
 Follow-up hardening: receiver call and SMS number fields now offer the Android
 system phone contact picker. A finished receiver call that receives HTTP 409 from
 the submit endpoint clears retained non-final mailbox records through the new

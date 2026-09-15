@@ -13,6 +13,9 @@ Status legend: [x] done · [~] in progress / partially done · [ ] not started
 
 Checkpoint 2026-09-15 — receiver-initiated outgoing calls (implementation):
 
+- Sender telephony handling now debounces a transient Samsung `IDLE` callback
+  between `placeCall` and `OFFHOOK`, preventing a premature ended state on the receiver.
+
 - Fixed repeated-call state races: the receiver persists the current request UUID and
   ignores retained completion records from older calls. Only WebRTC signaling marks
   receiver audio Connected. A regression test covers old-ended/current-connected order,

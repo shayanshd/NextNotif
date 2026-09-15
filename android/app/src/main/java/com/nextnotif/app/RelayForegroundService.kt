@@ -840,6 +840,18 @@ class RelayForegroundService : Service() {
 
     private var lastCallState: Int? = null
     private var currentCallNumber: String? = null
+    private var outgoingIdleJob: Job? = null
+
+    private fun finishOutgoingTelephonyCall() {
+        val active = activeCallCode
+        outgoingCallRequestId?.let { requestId -> active?.let { reportOutgoingCall(it, requestId, "ended") } }
+        outgoingCallRequestId = null
+        active?.let { code -> sockets[code]?.send("call_control", JSONObject().put("action", "ended")) }
+        buildSet {
+            active?.let(::add)
+            addAll(temporaryCallSockets)
+        }.forEach { completeLiveCall(it, "cellular_ended") }
+    }
 
     @Synchronized
     private fun handleCallState(state: Int, incomingNumber: String?) {
@@ -876,6 +888,8 @@ class RelayForegroundService : Service() {
         forwardCall(finalNumber, stateStr, System.currentTimeMillis(), name)
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
+                outgoingIdleJob?.cancel()
+                outgoingIdleJob = null
                 outgoingCallRequestId?.let { requestId ->
                     activeCallCode?.let { code -> reportOutgoingCall(code, requestId, "connected") }
                 }
@@ -895,16 +909,22 @@ class RelayForegroundService : Service() {
                     .forEach { completeLiveCall(it, "not_selected") }
             }
             TelephonyManager.CALL_STATE_IDLE -> {
-                val active = activeCallCode
-                outgoingCallRequestId?.let { requestId -> active?.let { reportOutgoingCall(it, requestId, "ended") } }
-                outgoingCallRequestId = null
-                active?.let { code ->
-                    sockets[code]?.send("call_control", JSONObject().put("action", "ended"))
+                // Some Samsung builds emit a transient IDLE between placeCall
+                // and OFFHOOK. Delay teardown so the receiver does not show
+                // “Call ended” while the cellular call is still starting.
+                val requestId = outgoingCallRequestId
+                if (requestId != null && previous != TelephonyManager.CALL_STATE_OFFHOOK) {
+                    outgoingIdleJob?.cancel()
+                    outgoingIdleJob = scope.launch {
+                        delay(2_500L)
+                        if (lastCallState == TelephonyManager.CALL_STATE_IDLE && outgoingCallRequestId == requestId) {
+                            finishOutgoingTelephonyCall()
+                        }
+                    }
+                    return
                 }
-                buildSet {
-                    active?.let(::add)
-                    addAll(temporaryCallSockets)
-                }.forEach { completeLiveCall(it, "cellular_ended") }
+                outgoingIdleJob = null
+                finishOutgoingTelephonyCall()
             }
         }
     }
