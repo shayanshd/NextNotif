@@ -45,6 +45,8 @@ class Pairing:
         # connect, and they are cleared with the slot on disconnect.
         self.sender_name: Optional[str] = None
         self.receiver_name: Optional[str] = None
+        self.sender_battery: Optional[int] = None
+        self.receiver_battery: Optional[int] = None
         # High-entropy per-device credentials issued at first auth. The 6-digit
         # code stays the bootstrap/pairing key; the token is the relay credential.
         self.tokens: list = list(tokens or [])
@@ -384,6 +386,10 @@ async def _ws_session(ws: WebSocket, role: str, path_code: Optional[str]) -> Non
                 pairing.sender_name = name
             else:
                 pairing.receiver_name = name
+        battery = first_msg.get("battery_percent")
+        if isinstance(battery, int) and not isinstance(battery, bool) and 0 <= battery <= 100:
+            if role == "sender": pairing.sender_battery = battery
+            else: pairing.receiver_battery = battery
         _store_fcm_token(pairing, role, first_msg.get("fcm_token"))
 
         # Device tokens: a presented token that belongs to this pairing is kept;
@@ -452,6 +458,14 @@ async def _ws_session(ws: WebSocket, role: str, path_code: Optional[str]) -> Non
             if data.get("type") == "fcm_token":
                 inner = data.get("data")
                 if _store_fcm_token(pairing, role, inner.get("token") if isinstance(inner, dict) else None):
+                    registry.save()
+                continue
+            if data.get("type") == "device_status":
+                inner = data.get("data")
+                battery = inner.get("battery_percent") if isinstance(inner, dict) else None
+                if isinstance(battery, int) and not isinstance(battery, bool) and 0 <= battery <= 100:
+                    if role == "sender": pairing.sender_battery = battery
+                    else: pairing.receiver_battery = battery
                     registry.save()
                 continue
 
@@ -863,6 +877,8 @@ async def pair_status(code: str, request: Request):
         "receiver_connected": p.receiver is not None,
         "sender_name": p.sender_name,
         "receiver_name": p.receiver_name,
+        "sender_battery": p.sender_battery,
+        "receiver_battery": p.receiver_battery,
         "sender_has_fcm": p.fcm.get("sender") is not None,
         "receiver_has_fcm": p.fcm.get("receiver") is not None,
     }

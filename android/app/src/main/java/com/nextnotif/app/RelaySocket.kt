@@ -1,6 +1,7 @@
 package com.nextnotif.app
 
 import android.os.Build
+import android.os.BatteryManager
 import android.util.Log
 import java.io.ByteArrayInputStream
 import java.net.InetAddress
@@ -94,6 +95,9 @@ class RelaySocket(
                     JSONObject().apply {
                         put("type", "hello")
                         put("device_name", deviceName())
+                        val battery = (context.getSystemService(android.content.Context.BATTERY_SERVICE) as? BatteryManager)
+                            ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                        if (battery != null && battery in 0..100) put("battery_percent", battery)
                         fcmToken?.let { put("fcm_token", it) }
                     }.toString(),
                 )
@@ -166,6 +170,12 @@ class RelaySocket(
         } catch (t: Throwable) {
             false
         }
+    }
+
+    fun sendBatteryStatus(): Boolean {
+        val battery = (context.getSystemService(android.content.Context.BATTERY_SERVICE) as? BatteryManager)
+            ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: return false
+        return send("device_status", JSONObject().put("battery_percent", battery))
     }
 
     /** Send an ephemeral media frame. The server never persists binary data. */

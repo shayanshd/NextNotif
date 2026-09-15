@@ -52,6 +52,7 @@ object AppState {
     data class PartnerState(
         val state: ConnState,
         val name: String? = null,
+        val batteryPercent: Int? = null,
     )
 
     data class Entry(
@@ -118,9 +119,9 @@ object AppState {
     }
 
     /** Set the partner (other end of the pairing) connection state for this code. */
-    fun setPartnerState(code: String, state: ConnState, name: String? = null) {
+    fun setPartnerState(code: String, state: ConnState, name: String? = null, batteryPercent: Int? = null) {
         val map = _partnerStates.value.toMutableMap()
-        map[code] = PartnerState(state, name)
+        map[code] = PartnerState(state, name, batteryPercent)
         _partnerStates.value = map
     }
 

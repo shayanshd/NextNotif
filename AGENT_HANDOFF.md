@@ -4,6 +4,13 @@
 
 ### 2026-09-15 — receiver-initiated outgoing call implementation
 
+Battery monitoring follow-up: sender WebSocket hello and periodic status heartbeats
+publish battery percentage. The receiver stores/displays the latest sender level and
+notifies once per low-battery episode below 20%, resetting at 20% or above. Worker
+version `add5cd7e-2605-460e-87eb-3854ae1a864d` is deployed; the Samsung APK is
+installed. Xiaomi was offline during this install and needs the APK installed when
+it reconnects.
+
 Latest fix: Samsung can emit a transient telephony `IDLE` between `placeCall` and
 `OFFHOOK`. Sender teardown now waits 2.5 seconds for `OFFHOOK` before reporting an
 outgoing call ended, while real post-call `IDLE` remains immediate. Android unit

@@ -99,6 +99,13 @@ fun partnerStatusFrom(statusJson: String, myRole: Role): Pair<Boolean, String?> 
     return (state == AppState.ConnState.CONNECTED) to name
 }
 
+fun partnerBatteryFrom(statusJson: String, myRole: Role): Int? {
+    val obj = org.json.JSONObject(statusJson)
+    val value = if (myRole == Role.SENDER) obj.optInt("receiver_battery", -1)
+    else obj.optInt("sender_battery", -1)
+    return value.takeIf { it in 0..100 }
+}
+
 /** User-facing pairing state. Technical transport errors are mapped separately. */
 enum class PairingReadinessKind {
     READY,

@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.PendingIntent
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -734,6 +735,7 @@ class RelayForegroundService : Service() {
         for (p in SessionStore.load(this@RelayForegroundService).pairings) {
             if (!p.enabled) continue
             if (p.isFirebase) continue
+            if (p.role == Role.SENDER) sockets[p.code]?.sendBatteryStatus()
             val http = p.server.replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
             withContext(Dispatchers.IO) {
                 runCatching {
@@ -742,16 +744,41 @@ class RelayForegroundService : Service() {
                     conn.connectTimeout = 3000
                     conn.readTimeout = 3000
                     if (conn.responseCode == 200) {
-                        val (partnerState, partnerName) =
-                            partnerStateFrom(conn.inputStream.bufferedReader().readText(), p.role)
+                        val body = conn.inputStream.bufferedReader().readText()
+                        val (partnerState, partnerName) = partnerStateFrom(body, p.role)
+                        val partnerBattery = partnerBatteryFrom(body, p.role)
                         AppState.setPartnerState(
                             p.code,
                             partnerState,
                             partnerName,
+                            partnerBattery,
                         )
+                        if (p.role == Role.RECEIVER) notifyLowSenderBattery(p, partnerBattery)
                     }
                 }.onFailure { Log.w(TAG, "partner status poll failed for ${p.code}: ${it.message}") }
             }
+        }
+    }
+
+    private fun notifyLowSenderBattery(pairing: PairingInfo, battery: Int?) {
+        val prefs = getSharedPreferences("sender_battery_alerts", Context.MODE_PRIVATE)
+        val key = pairing.code
+        if (battery != null && battery < 20) {
+            if (!prefs.getBoolean(key, false)) {
+                Notifications.ensureChannels(this)
+                val notification = NotificationCompat.Builder(this, Notifications.CHANNEL_RELAY)
+                    .setSmallIcon(android.R.drawable.stat_sys_warning)
+                    .setContentTitle("Sender battery low")
+                    .setContentText("${pairing.displayName} sender battery is ${battery}%")
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setAutoCancel(true)
+                    .build()
+                (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                    .notify((key.hashCode() and 0x7fffffff), notification)
+                prefs.edit().putBoolean(key, true).apply()
+            }
+        } else if (battery != null && battery >= 20) {
+            prefs.edit().putBoolean(key, false).apply()
         }
     }
 

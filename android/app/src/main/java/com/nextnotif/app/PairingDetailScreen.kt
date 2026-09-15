@@ -233,6 +233,14 @@ fun PairingDetailScreen(
                             state = partnerInfo.state,
                             partner = true,
                         )
+                        partnerInfo.batteryPercent?.let { battery ->
+                            Text(
+                                "Sender battery: ${battery}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (battery < 20) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         if (error != null) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,

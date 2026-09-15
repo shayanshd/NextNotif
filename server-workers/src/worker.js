@@ -181,6 +181,7 @@ export class RelayPairing extends DurableObject {
   async getStatus() {
     const paired = await this.state.storage.get('paired');
     const names = await this.getNames();
+    const batteries = (await this.state.storage.get('batteries')) || {};
     const fcm = await this.getFcm();
     const sockets = this.liveSockets();
     return {
@@ -191,6 +192,8 @@ export class RelayPairing extends DurableObject {
       receiver_connected: sockets.receiver !== null,
       sender_name: names.sender ?? null,
       receiver_name: names.receiver ?? null,
+      sender_battery: Number.isInteger(batteries.sender) ? batteries.sender : null,
+      receiver_battery: Number.isInteger(batteries.receiver) ? batteries.receiver : null,
       sender_has_fcm: fcm.sender != null,
       receiver_has_fcm: fcm.receiver != null,
     };
@@ -765,6 +768,13 @@ export class RelayPairing extends DurableObject {
             names[role] = name;
             await this.putNames(names);
           }
+          const battery = Number.isInteger(msg.battery_percent) && msg.battery_percent >= 0 && msg.battery_percent <= 100
+            ? msg.battery_percent : null;
+          if (battery != null) {
+            const batteries = (await this.state.storage.get('batteries')) || {};
+            batteries[role] = battery;
+            await this.state.storage.put('batteries', batteries);
+          }
           // Optional FCM wake token for kill-recovery of this peer.
           await this.storeFcmToken(role, msg.fcm_token);
           // First message received: issue the one-time token.
@@ -835,6 +845,16 @@ export class RelayPairing extends DurableObject {
     // OS change rotates it without a re-pairing).
     if (msg.type === 'fcm_token') {
       await this.storeFcmToken(role, msg.data && msg.data.token);
+      return;
+    }
+    if (msg.type === 'device_status') {
+      const battery = msg.data && Number.isInteger(msg.data.battery_percent) && msg.data.battery_percent >= 0 && msg.data.battery_percent <= 100
+        ? msg.data.battery_percent : null;
+      if (battery != null) {
+        const batteries = (await this.state.storage.get('batteries')) || {};
+        batteries[role] = battery;
+        await this.state.storage.put('batteries', batteries);
+      }
       return;
     }
 
