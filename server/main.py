@@ -870,7 +870,7 @@ async def pair_status(code: str, request: Request):
 
 @app.post("/sms-{operation}")
 async def sms_operation(operation: str, request: Request):
-    if operation not in {"submit", "fetch", "result", "status"}:
+    if operation not in {"submit", "fetch", "result", "status", "cancel"}:
         return JSONResponse({"error": "unknown operation"}, status_code=404)
     code = request.headers.get(CODE_HEADER)
     p = registry.get(code) if _valid_code(code) else None
@@ -922,6 +922,13 @@ async def sms_operation(operation: str, request: Request):
                 except Exception:
                     pass
             asyncio.get_running_loop().run_in_executor(None, fcm_wake, p, "receiver", "sms_status", {}, body["id"])
+            return {"ok": True}
+        if operation == "cancel":
+            if call_mailbox.cancel_active(p.call_commands):
+                registry.save(strict=True)
+                if p.sender is not None:
+                    try: await p.sender.send_text(json.dumps({"type": "call_sync", "data": {}}))
+                    except Exception: pass
             return {"ok": True}
         registry.save(strict=True)
         return {"commands": [x for x in p.sms_commands if x["status"] in {"queued", "sending"}]

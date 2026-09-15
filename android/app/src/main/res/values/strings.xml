@@ -199,6 +199,7 @@
     <string name="edit_cta">Save changes</string>
 
     <string name="cancel">Cancel</string>
+    <string name="choose_contact">Choose contact</string>
     <string name="perm_gate_title">Permissions needed</string>
     <string name="perm_gate_body">The enabled pairing needs the permissions below for its core forwarding features.</string>
     <string name="perm_gate_list_label">Required permissions</string>

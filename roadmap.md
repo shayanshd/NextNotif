@@ -24,9 +24,13 @@ Checkpoint 2026-09-15 — receiver-initiated outgoing calls (implementation):
 - Calls now offers **Call through sender** for enabled server-backed receiver
   pairings. The receiver chooses a destination and a reported sender SIM, then
   remains in the existing live-call screen for WebRTC audio and hang-up.
+- Call and SMS number fields now include the system contact picker; selecting a
+  contact fills its phone number while manual entry remains available.
 - Added durable authenticated call submit/fetch/result/status mailboxes to Python
   and Worker relays. Requests expire after two minutes, reject overlap, retain an
   immutable UUID/SIM selection, and wake the sender through FCM.
+- A receiver can recover a stale active mailbox request: after a 409 on a finished
+  call screen, the app cancels retained non-final records and retries the same call.
 - The sender requires its existing live-call opt-in/root capability plus CALL_PHONE,
   maps the selected subscription exactly to an Android Telecom phone account, places the
   cellular call, and reuses the temporary WebRTC bridge. It never falls back to a

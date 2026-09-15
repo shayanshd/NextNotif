@@ -58,3 +58,12 @@ def update(records, result):
         return True
     record.update(status=result["status"], detail=str(result.get("detail", ""))[:240])
     return True
+
+
+def cancel_active(records, detail="Receiver started a new call"):
+    changed = False
+    for record in records:
+        if record["status"] not in FINAL:
+            record.update(status="ended", detail=detail[:240])
+            changed = True
+    return changed

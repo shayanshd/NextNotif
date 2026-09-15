@@ -7,7 +7,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -17,7 +16,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
@@ -74,9 +72,7 @@ internal fun NewOutgoingCallScreen(pairings: List<PairingInfo>, onBack: () -> Un
                     choices.forEach { p -> DropdownMenuItem({ Text(p.displayName) }, { code = p.code; pairingMenu = false }) }
                 }
             }
-            OutlinedTextField(number, { number = it; error = null }, Modifier.fillMaxWidth(), singleLine = true,
-                label = { Text(stringResource(R.string.sms_number_label)) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            ContactPhoneField(number, { number = it; error = null }, Modifier.fillMaxWidth(),
                 isError = number.isNotEmpty() && smsDestination(number) == null)
             SenderSimSelector(options, subscriptionId, loading, failed, { subscriptionId = it }, {
                 selected?.let { pairing -> scope.launch {

@@ -76,8 +76,17 @@ internal object OutgoingCallRelay {
         try {
             post(pairing, "call-submit", command)
         } catch (failure: Throwable) {
-            OutgoingCallRequestStore.clearIfCurrent(context, pairing.code, id)
-            throw failure
+            if (failure.message?.contains("HTTP 409") == true &&
+                RelayCallUiPolicy.finished(AppState.callRelay.value.phase)) {
+                runCatching { post(pairing, "call-cancel", JSONObject().put("reason", "Receiver started a new call")) }
+                runCatching { post(pairing, "call-submit", command) }.getOrElse {
+                    OutgoingCallRequestStore.clearIfCurrent(context, pairing.code, id)
+                    throw it
+                }
+            } else {
+                OutgoingCallRequestStore.clearIfCurrent(context, pairing.code, id)
+                throw failure
+            }
         }
         AppState.updateCall(pairing.code, AppState.CallPhase.CONNECTING, number = number)
         RelayForegroundService.Controller.beginOutgoingCall(context, pairing.code, id, number)

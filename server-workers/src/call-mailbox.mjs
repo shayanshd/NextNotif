@@ -30,3 +30,10 @@ export function updateCall(records, result) {
   record.detail = typeof result.detail === 'string' ? result.detail.slice(0, 240) : '';
   return true;
 }
+export function cancelActiveCalls(records, detail = 'Receiver started a new call') {
+  let changed = false;
+  for (const record of records) if (!FINAL.has(record.status)) {
+    record.status = 'ended'; record.detail = String(detail).slice(0, 240); changed = true;
+  }
+  return changed;
+}

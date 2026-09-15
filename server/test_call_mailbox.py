@@ -28,8 +28,13 @@ class CallMailboxTest(unittest.TestCase):
         call_mailbox.submit(records, self.command, self.now)
         call_mailbox.expire(records, self.now + call_mailbox.TTL_MS)
         self.assertEqual(records[0]["status"], "expired")
+
+    def test_receiver_can_clear_a_stale_active_request(self):
+        records = []
+        call_mailbox.submit(records, self.command, self.now)
         call_mailbox.update(records, {"id": self.command["id"], "status": "connected"})
-        self.assertEqual(records[0]["status"], "expired")
+        self.assertTrue(call_mailbox.cancel_active(records))
+        self.assertEqual(records[0]["status"], "ended")
 
 
 class CallHttpTest(unittest.IsolatedAsyncioTestCase):

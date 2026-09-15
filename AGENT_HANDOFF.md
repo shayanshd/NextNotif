@@ -4,6 +4,14 @@
 
 ### 2026-09-15 — receiver-initiated outgoing call implementation
 
+Follow-up hardening: receiver call and SMS number fields now offer the Android
+system phone contact picker. A finished receiver call that receives HTTP 409 from
+the submit endpoint clears retained non-final mailbox records through the new
+authenticated cancel operation, then retries the same UUID, destination, and SIM;
+active calls are never force-cancelled. Python/Node tests cover cancellation and
+the Android debug/unit/test APK build passes. Returned-contact selection was not
+completed on the emulator because it has no usable Contacts handler.
+
 Receiver status-race follow-up: repeated physical calls sometimes showed Ended before
 switching to Connected. `/call-status` intentionally retains recent records, but the
 receiver was applying every historical `ended` record to the screen by pairing code.

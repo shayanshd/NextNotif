@@ -6,7 +6,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -16,7 +15,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
@@ -202,9 +200,7 @@ internal fun NewSmsScreen(pairings: List<PairingInfo>, onBack: () -> Unit, onSen
                         choices.forEach { p -> DropdownMenuItem(text = { Text(p.displayName) }, onClick = { code = p.code; menu = false }) }
                     }
                 }
-                OutlinedTextField(number, { number = it }, Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text(stringResource(R.string.sms_number_label)) },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                ContactPhoneField(number, { number = it }, Modifier.fillMaxWidth(),
                     isError = number.isNotEmpty() && smsDestination(number) == null)
                 Text(stringResource(R.string.sms_charges), style = MaterialTheme.typography.bodySmall)
             }

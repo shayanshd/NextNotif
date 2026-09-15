@@ -1,5 +1,5 @@
 import { submitSms, updateSms, expireSms, simOptions } from './sms-mailbox.mjs';
-import { submitCall, updateCall, expireCalls } from './call-mailbox.mjs';
+import { submitCall, updateCall, expireCalls, cancelActiveCalls } from './call-mailbox.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import { cloudflareIceServers, consumeIceBudget } from './turn-credentials.mjs';
 import { SecurePairingStore } from './secure-pairing-store.mjs';
@@ -460,7 +460,7 @@ export class RelayPairing extends DurableObject {
     const parts = url.pathname.split('/').filter(Boolean);
     const operation = parts[0];
     const smsOperation = ['sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(operation);
-    const callOperation = ['call-submit', 'call-fetch', 'call-result', 'call-status'].includes(operation);
+    const callOperation = ['call-submit', 'call-fetch', 'call-result', 'call-status', 'call-cancel'].includes(operation);
     const requestedRole = request.headers.get('X-NextNotif-Role') || 'receiver';
     if (!['sender', 'receiver'].includes(requestedRole)) return Response.json({error: 'invalid role'}, {status: 400});
     let secure = false;
@@ -539,8 +539,9 @@ export class RelayPairing extends DurableObject {
       }
       if (operation === 'call-result' && !updateCall(records, body))
         return Response.json({error: 'invalid result'}, {status: 400});
+      if (operation === 'call-cancel') cancelActiveCalls(records, body?.reason || 'Receiver started a new call');
       await this.state.storage.put('callCommands', records);
-      if (operation === 'call-result') {
+      if (operation === 'call-result' || operation === 'call-cancel') {
         this.signalSmsSync('receiver', 'call_sync');
         this.state.waitUntil(this.maybeFcmWake('receiver', {type: 'call_status'}));
         return Response.json({ok: true});
@@ -968,7 +969,7 @@ export default {
       request.method === 'POST' &&
       parts.length === 1 &&
       ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
-        'call-submit', 'call-fetch', 'call-result', 'call-status'].includes(parts[0])
+        'call-submit', 'call-fetch', 'call-result', 'call-status', 'call-cancel'].includes(parts[0])
     ) {
       if (!isValidCode(headerCode)) {
         return Response.json({ error: 'missing pairing code' }, { status: 400 });
@@ -980,7 +981,7 @@ export default {
       request.method === 'POST' &&
       parts.length === 2 &&
       ['fcm-register', 'drain', 'fetch', 'ack', 'ice', 'sms-submit', 'sms-fetch', 'sms-result', 'sms-status',
-        'call-submit', 'call-fetch', 'call-result', 'call-status'].includes(parts[0])
+        'call-submit', 'call-fetch', 'call-result', 'call-status', 'call-cancel'].includes(parts[0])
     ) {
       const code = isValidCode(headerCode) ? headerCode : parts[1];
       if (!isValidCode(code)) return new Response('Not found', { status: 404 });

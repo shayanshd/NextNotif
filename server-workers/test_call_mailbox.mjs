@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {submitCall, updateCall, expireCalls, validCall, CALL_TTL_MS} from './src/call-mailbox.mjs';
+import {submitCall, updateCall, expireCalls, validCall, cancelActiveCalls, CALL_TTL_MS} from './src/call-mailbox.mjs';
 const now = 1000000;
 const command = {id: '00000000-0000-4000-8000-000000000001', to: '+15551234567', subscription_id: 12, created_at: now};
 let result = submitCall([], command, now);
@@ -15,4 +15,8 @@ result.records = expireCalls(result.records, now + CALL_TTL_MS);
 assert.equal(result.records[0].status, 'expired');
 updateCall(result.records, {id: command.id, status: 'connected'});
 assert.equal(result.records[0].status, 'expired');
+result = submitCall([], command, now);
+assert.equal(updateCall(result.records, {id: command.id, status: 'connected'}), true);
+assert.equal(cancelActiveCalls(result.records), true);
+assert.equal(result.records[0].status, 'ended');
 console.log('Outgoing call mailbox validation, exclusivity, expiry and immutable SIM selection passed');
