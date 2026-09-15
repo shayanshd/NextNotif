@@ -10,6 +10,8 @@ notifies once per low-battery episode below 20%, resetting at 20% or above. Work
 version `add5cd7e-2605-460e-87eb-3854ae1a864d` is deployed; the Samsung APK is
 installed. Xiaomi was offline during this install and needs the APK installed when
 it reconnects.
+The battery percentage is now also shown directly on the receiver Home pairing card;
+the latest APK is installed on both phones.
 
 Latest fix: Samsung can emit a transient telephony `IDLE` between `placeCall` and
 `OFFHOOK`. Sender teardown now waits 2.5 seconds for `OFFHOOK` before reporting an

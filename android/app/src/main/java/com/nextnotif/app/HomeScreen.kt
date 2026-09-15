@@ -394,6 +394,7 @@ fun HomeScreen(
                                 ownState = connStates[p.code] ?: AppState.ConnState.IDLE,
                                 partnerState = partner.state,
                                 partnerName = partner.name,
+                                partnerBattery = partner.batteryPercent,
                                 error = pairingErrors[p.code],
                                 notificationPermissionMissing = notifPermMissing,
                                 liveCallCapability = liveCallCapabilities[p.code],
@@ -647,6 +648,7 @@ private fun PairingCard(
     ownState: AppState.ConnState,
     partnerState: AppState.ConnState,
     partnerName: String?,
+    partnerBattery: Int?,
     error: String?,
     notificationPermissionMissing: Boolean,
     liveCallCapability: GatewayCapability?,
@@ -791,6 +793,14 @@ private fun PairingCard(
                 senderOnDemand = pairing.role == Role.SENDER && pairing.isFcmOnDemand,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
             )
+            if (pairing.role == Role.RECEIVER && partnerBattery != null) {
+                Text(
+                    "Sender battery: ${partnerBattery}%",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (partnerBattery < 20) cs.error else cs.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                )
+            }
             if (enabled && pairing.role == Role.SENDER && pairing.liveCallEnabled) {
                 LiveCallCapabilitySummary(
                     capability = liveCallCapability,
