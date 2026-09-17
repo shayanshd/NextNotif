@@ -14,6 +14,16 @@ android {
         versionCode = 1
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Public SDK settings for the existing NextNotif Android registration.
+        // Gradle properties can override these together for a private build.
+        for ((resource, config) in mapOf(
+            "google_app_id" to ("nextnotif.fcm.appId" to "1:223835571995:android:e18d5607a74d20ddfff5be"),
+            "google_api_key" to ("nextnotif.fcm.apiKey" to "AIzaSyC15xJn01Yn8h6F7UcsYnJ54Qe4J0pStLY"),
+            "gcm_defaultSenderId" to ("nextnotif.fcm.senderId" to "223835571995"),
+            "project_id" to ("nextnotif.fcm.projectId" to "nextnotif-5bcf9"),
+        )) {
+            resValue("string", resource, providers.gradleProperty(config.first).orElse(config.second).get())
+        }
     }
 
     buildTypes {
@@ -73,6 +83,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.google.firebase:firebase-auth-ktx:23.1.0")
     implementation("com.google.firebase:firebase-database-ktx:21.0.0")
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

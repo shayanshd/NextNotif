@@ -89,19 +89,24 @@ class RelaySocket(
                             put("token", token)
                             put("code", code)
                             deviceToken?.let { put("device_token", it) }
+                            if (role == Role.RECEIVER) RelayWake.token.value?.let { put("fcm_token", it) }
                         }
                         // Only report Open once we can actually send; the service
                         // flushes its outbox on Open and send() is gated on auth.
-                        if (webSocket.send(auth.toString())) {
-                            isAuthenticated = true
-                            onEvent(Event.Open)
-                        }
+                        webSocket.send(auth.toString())
                         return@runCatching
                     }
                     if (type == "auth") return@runCatching
                     if (type == "auth_ok") {
                         val dt = obj.optString("device_token", "")
                         if (dt.isNotEmpty()) onEvent(Event.AuthOk(dt))
+                        if (!isAuthenticated) {
+                            isAuthenticated = true
+                            if (role == Role.RECEIVER) RelayWake.token.value?.let {
+                                send("fcm_token", JSONObject().put("token", it))
+                            }
+                            onEvent(Event.Open)
+                        }
                         return@runCatching
                     }
                     val data = obj.optJSONObject("data") ?: JSONObject()

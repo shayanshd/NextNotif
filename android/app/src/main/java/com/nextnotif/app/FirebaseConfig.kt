@@ -51,3 +51,12 @@ object FirebaseConfig {
             .find(text)?.groupValues?.get(1)
             ?.takeIf { it.isNotBlank() }
 }
+
+/** Stable SDK namespace for one pairing and configuration, separate from FCM. */
+internal fun firebaseRelayAppName(code: String, cfg: FirebaseCfg): String {
+    val identity = listOf(code, cfg.apiKey, cfg.databaseUrl, cfg.appId).joinToString("\u0000")
+    val hash = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(identity.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+    return "relay-$hash"
+}

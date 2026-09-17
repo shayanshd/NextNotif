@@ -77,6 +77,16 @@ class RelayForegroundService : Service() {
         setupPhoneStateListener()
         setupNetworkCallback()
         pollPartnerStatuses()
+        RelayWake.refreshToken(this)
+        scope.launch(Dispatchers.Main) {
+            RelayWake.token.collect { token ->
+                if (token != null) {
+                    SessionStore.load(this@RelayForegroundService).pairings
+                        .filter { it.enabled && it.role == Role.RECEIVER && it.isWs }
+                        .forEach { sockets[it.code]?.send("fcm_token", JSONObject().put("token", token)) }
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -208,7 +218,7 @@ class RelayForegroundService : Service() {
             FirebaseRelay.State.CONNECTED -> {
                 AppState.setConnState(code, AppState.ConnState.CONNECTED)
                 AppState.setPairingError(code, null)
-                AppState.push("WS", "firebase connected (code $code)", code)
+                AppState.push(AppState.EventKind.Connected(firebase = true), code)
                 Log.i(TAG, "firebase connected code=$code")
                 flushFbOutbox(firebaseRelays[code] ?: return)
             }
@@ -220,7 +230,7 @@ class RelayForegroundService : Service() {
                 AppState.setConnState(code, AppState.ConnState.DISCONNECTED)
                 val err = relay.failed
                 AppState.setPairingError(code, err)
-                AppState.push("WS", "firebase $code disconnected: $err", code)
+                AppState.push(AppState.EventKind.Failed(err ?: "disconnected"), code)
                 Log.w(TAG, "firebase $code: $err")
                 val p = SessionStore.load(this).pairings.firstOrNull { it.code == code }
                 if (p != null) scheduleReconnectFor(p)
@@ -235,7 +245,7 @@ class RelayForegroundService : Service() {
         for ((type, data) in queued) {
             if (relay.send(type, data)) sent++
         }
-        AppState.push("WS", "flushed $sent queued event(s) for ${relay.code}", relay.code)
+        AppState.push(AppState.EventKind.Flushed(sent), relay.code)
     }
 
     private fun stopFirebaseRelay(code: String) {
@@ -277,7 +287,7 @@ class RelayForegroundService : Service() {
                 // partner's state comes from the /pair/{code}/status poll.
                 AppState.setConnState(pairing.code, AppState.ConnState.CONNECTED)
                 AppState.setPairingError(pairing.code, null)
-                AppState.push("WS", "connected as ${pairing.role} (code ${pairing.code})", pairing.code)
+                AppState.push(AppState.EventKind.Connected(firebase = false), pairing.code)
                 Log.i(TAG, "ws open code=${pairing.code}")
                 val queued = OutboxQueue.drain(this@RelayForegroundService, pairing.code)
                 if (queued.isNotEmpty()) {
@@ -286,20 +296,20 @@ class RelayForegroundService : Service() {
                         // The guard above proves s is still the current socket.
                         if (s?.send(type, data) == true) sent++
                     }
-                    AppState.push("WS", "flushed $sent queued event(s) for ${pairing.code}", pairing.code)
+                    AppState.push(AppState.EventKind.Flushed(sent), pairing.code)
                 }
             }
             is RelaySocket.Event.AuthOk -> saveDeviceToken(pairing.code, evt.deviceToken)
             is RelaySocket.Event.Closed -> {
                 AppState.setConnState(pairing.code, AppState.ConnState.DISCONNECTED)
-                AppState.push("WS", "closed ${pairing.code}: ${evt.reason}", pairing.code)
+                AppState.push(AppState.EventKind.Closed(evt.reason), pairing.code)
                 Log.w(TAG, "ws closed ${pairing.code}: ${evt.reason}")
                 scheduleReconnectFor(pairing)
             }
             is RelaySocket.Event.Failure -> {
                 AppState.setConnState(pairing.code, AppState.ConnState.DISCONNECTED)
                 AppState.setPairingError(pairing.code, evt.error)
-                AppState.push("WS", "error ${pairing.code}: ${evt.error}", pairing.code)
+                AppState.push(AppState.EventKind.Failed(evt.error), pairing.code)
                 Log.w(TAG, "ws failure ${pairing.code}: ${evt.error}")
                 scheduleReconnectFor(pairing)
             }
@@ -332,13 +342,14 @@ class RelayForegroundService : Service() {
         reconnectJobs[pairing.code] = scope.launch {
             val attempt = (reconnectJobs.filterValues { it.isActive }.size + 1).coerceAtMost(6)
             val delayMs = (1000L shl (attempt - 1)).coerceAtMost(15_000L)
-            AppState.push("WS", "reconnecting ${pairing.code} in ${delayMs}ms (attempt $attempt)", pairing.code)
+            AppState.push(AppState.EventKind.Reconnecting(attempt, delayMs), pairing.code)
             delay(delayMs)
             connectPairing(pairing)
         }
     }
 
     private fun handleIncoming(evt: RelaySocket.Event.Incoming, code: String?) {
+        if (code != null) IncomingNotifier.clearWake(this, code)
         val data = evt.data
         val number = when (evt.type) {
             "sms" -> data.optString("from")
@@ -371,7 +382,7 @@ class RelayForegroundService : Service() {
                 AppState.pushOutgoing(type, payload, p.code)
             } else {
                 OutboxQueue.enqueue(this, p.code, type, payload)
-                AppState.push("OUT", "queued $type (no route)", p.code)
+                AppState.push(AppState.EventKind.Queued(type), p.code)
             }
         }
         // While the network is up, also try to clear anything older that is
@@ -414,11 +425,11 @@ class RelayForegroundService : Service() {
                 }
             }
             for ((type, data) in failed) OutboxQueue.enqueue(this, p.code, type, data)
-            if (sent > 0) AppState.push("OUT", "flushed $sent queued event(s)", p.code)
+            if (sent > 0) AppState.push(AppState.EventKind.Flushed(sent), p.code)
             if (failed.isNotEmpty()) anyFailed = true
         }
         if (anyFailed) {
-            AppState.push("OUT", "some queued event(s) still waiting")
+            AppState.push(AppState.EventKind.StillWaiting)
             scheduleRetry()
         }
     }
@@ -427,7 +438,7 @@ class RelayForegroundService : Service() {
         // Simple backoff: re-use sendScope with a fixed 30 s delay. The outbox
         // drain is idempotent, so repeated scheduling is harmless.
         val delayMs = 30_000L
-        AppState.push("OUT", "retrying in ${delayMs / 1000}s")
+        AppState.push(AppState.EventKind.StillWaiting)
         Log.i(TAG, "outbox retry in ${delayMs}ms")
         sendScope.launch {
             delay(delayMs)
@@ -663,15 +674,18 @@ class RelayForegroundService : Service() {
 
     object Controller {
         fun start(ctx: Context) {
+            RelayWake.setRequested(ctx, true)
             start(ctx, ACTION_START, emptyArray())
         }
 
         fun stop(ctx: Context) {
+            RelayWake.setRequested(ctx, false)
             val i = Intent(ctx, RelayForegroundService::class.java).setAction(ACTION_STOP)
             ctx.startService(i)
         }
 
         fun startPairing(ctx: Context, code: String) {
+            RelayWake.setRequested(ctx, true)
             start(ctx, ACTION_START_PAIRING, arrayOf("code" to code))
         }
 

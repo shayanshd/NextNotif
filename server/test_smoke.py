@@ -11,6 +11,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -24,7 +25,8 @@ import fcm
 
 HOST = "127.0.0.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
-PAIRINGS_FILE = os.path.join(HERE, "pairings.json")
+TEST_DIR = tempfile.TemporaryDirectory(prefix="nextnotif-smoke-")
+PAIRINGS_FILE = os.path.join(TEST_DIR.name, "pairings.json")
 AUTO_CODE = "424242"
 # Well-formed enough to pass server-side validation (>= 20 chars, no blanks).
 FCM_TOKEN = "test-fcm-token-" + "a1b2c3d4e5f6" * 6
@@ -54,6 +56,7 @@ def remove_pairings_file() -> None:
 def fresh_app():
     sys.modules.pop("main", None)
     import main
+    main.registry.__init__(PAIRINGS_FILE)
 
     return main.app
 
@@ -548,7 +551,7 @@ class FcmStub:
         self.server.server_close()
 
 
-SA_PATH = os.path.join(HERE, "fcm-test-sa.json")
+SA_PATH = os.path.join(TEST_DIR.name, "fcm-test-sa.json")
 
 
 def make_service_account():
@@ -608,6 +611,12 @@ def current_pairing(code: str):
 async def check_fcm_register(h, fcm_token):
     """fcm_token on auth is stored per role and reported by /status."""
     code = await fresh_code(h)
+    unauth = await websockets.connect(f"{h.ws_base}/ws/receiver/{code}")
+    await unauth.send(json.dumps({"type": "hello", "fcm_token": fcm_token}))
+    assert json.loads(await unauth.recv())["type"] == "handshake"
+    assert not current_pairing(code).fcm, "unauthenticated hello persisted a push token"
+    await unauth.close()
+    assert await wait_disconnected(h, code, "receiver")
     receiver, _ = await authed_connect(h, f"/ws/receiver/{code}", code, fcm_token=fcm_token)
     try:
         async with httpx.AsyncClient() as client:
@@ -638,10 +647,9 @@ async def check_fcm_wake_offline(h, code, stub, public_key, fcm_token):
     assert msg["auth"] == "Bearer stub-access-token", msg["auth"]
     body = msg["body"]["message"]
     assert body["token"] == fcm_token, body
-    assert body["notification"]["body"] == "wake me up", body
-    assert "+15550001111" in body["notification"]["title"], body
-    assert body["data"]["nn"] == "1" and body["data"]["code"] == code and body["data"]["type"] == "sms", body
-    assert json.loads(body["data"]["data"])["body"] == "wake me up", body
+    assert "notification" not in body, body
+    assert body["data"] == {"nn": "1", "code": code, "action": "wake"}, body
+    assert body["android"] == {"priority": "high"}, body
     assert body["android"]["priority"] == "high", body
 
     # The OAuth assertion must be a valid RS256 JWT for the FCM scope, signed

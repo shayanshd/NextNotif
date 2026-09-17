@@ -26,7 +26,7 @@ Status legend: [x] done · [~] in progress / partially done · [ ] not started
 | 9 | Runs on Android 8+ (API 26) | [x] | `minSdk = 26`, API-26 compat shims (see §4) |
 | 10 | Status + live event log in UI + **partner connection indicator** | [x] | `AppState.kt` (per-pairing `connStates` + `partnerStates` maps), `HomeScreen.kt` (one `PairingCard` per pairing: own conn state row + "Partner online/offline" badge); partner state refreshed via server `/pair/{code}/status` poll (30 s, immediate first tick) and own socket open/close events. See §8. |
 | 17 | Many-to-many pairing (one sender ↔ multiple receivers; one receiver ↔ multiple senders) | [x] | `SessionStore` persists a `pairings: List<PairingInfo>` (JSON under `pairings`, legacy single-code fields auto-migrated on load and kept in sync for compat). Service runs one socket/uplink/Firebase-relay + outbox queue + reconnect job per pairing. UI: Add pairing (menu) / remove-per-card. See §8. |
-| 18 | UI redesigned around pairings (hub, per-pairing identity + detail + history, full-screen add/edit) | [x] | `HomeScreen` (hub: hero card, pairing cards w/ labels + dual status pills, feed w/ pairing chips, add-pairing FAB), `PairingDetailScreen`, `AddEditPairingScreen`; `PairingInfo.label` persisted; per-pairing log entries (`AppState.Entry.code`); manual back-stack nav. See §9. |
+| 18 | UI redesigned around pairings (hub, per-pairing identity + detail + history, full-screen add/edit) | [x] | `HomeScreen` (hub: hero card, pairing cards w/ labels + dual status pills, feed w/ pairing chips, add-pairing FAB), `PairingDetailScreen`, `AddEditPairingScreen`; `PairingInfo.label` persisted; per-pairing log entries (`AppState.Entry.code`); manual back-stack nav. See §9. v3 design language (§10) + v4 structured feed/motion (§10a, **device-verified 2026-09-11**): typed `EventKind` entries with localized feed titles, live uptime chip, animated transitions. |
 | 11 | Survive reboot + battery killing | [x] | `BootReceiver.kt`, `BatteryGuard.kt` |
 | 12 | Queue events while offline, replay on reconnect | [x] | `OutboxQueue.kt` |
 | 13 | Show contact name on incoming calls | [x] | `Contacts.kt` (fuzzy match, cached), resolved on **both** phones — receiver's own contacts first, sender-provided name as fallback; `IncomingNotifier.kt` shows `Name (number)` |
@@ -178,6 +178,68 @@ Continues the v2 hub UI with one consistent design language across all screens
 Status: `testDebugUnitTest` 45/45, `assembleDebug` + `assembleRelease` (lint + R8)
 BUILD SUCCESSFUL. **Not yet device-verified** — same pending Samsung + Xiaomi E2E
 as v2 (§9).
+
+## 10a. UI redesign v4 — structured feed + motion (2026-09-11)
+
+Content + motion pass over the v3 design language (public screen signatures and
+navigation model untouched):
+
+- **Structured activity entries** — `AppState.Entry` no longer stores
+  `(tag, message)` English log strings that the UI had to *parse back* with
+  `startsWith`/`substringAfter` pattern matching. Entries now carry a typed
+  `EventKind` (SmsIn/CallIn/SmsOut/CallOut/Connected/Closed/Failed/Reconnecting/
+  Flushed/Queued/StillWaiting/Info) with the actual fields (from/name/body/
+  state/count/attempt/firebase flag); `pushIncoming`/`pushOutgoing` build the
+  kind directly from the relay payload. The old string-building (and the
+  >80-char body handling that motivated it) is gone — the full body rides in
+  `SmsIn.body`.
+- **Localized feed titles** — `entryVisual` renders titles via
+  `stringResource(R.string.feed_*)` from the kind's fields, so every feed title
+  is translatable (18 new strings: `feed_sms_in`, `feed_call_in_ringing/…`,
+  `feed_connected_ws/fb`, `feed_flushed`, …). Shared pure helper
+  `eventParticipant(name, number)` formats "Name (number)" / name-only /
+  "unknown" (4 unit tests).
+- **Live uptime chip** — the hero card gains a "Live 12m" chip while any
+  pairing is connected: `AppState.connSince` (already tracked by the aggregate)
+  rendered through a new pure `uptimeLabel()` formatter ("45s" → "12m" →
+  "3h 05m" → "2d 5h", 8 unit tests) with a 1 s ticker that only runs while
+  `running`.
+- **Animated screen transitions** — `MainActivity`'s manual back-stack nav now
+  renders through `AnimatedContent`: forward navigation (home → detail →
+  add/edit) slides in from the right + fade, back navigation slides back out,
+  direction-aware via a screen-depth function. No navigation dependency
+  added.
+- **Deduplicated visuals** — close vs. failure are separate kinds (v3 showed
+  both as one title), "flushed 1" gets its own singular string, and the
+  StillWaiting retry notice reuses the same kind instead of two distinct
+  log strings.
+
+Status: `testDebugUnitTest` 62/62 (AppStateTest rewritten for kinds — 16 tests,
+ComponentsTest +12 for `uptimeLabel`/`eventParticipant`), `assembleDebug` +
+`assembleRelease` (lint + R8) BUILD SUCCESSFUL.
+
+**Device E2E (2026-09-11, Samsung SM-A520F API 26 ↔ Xiaomi 23049PCD8G API 35/MIUI
+over the production worker `relay.amberdogeorgia.com`)** — all v4 surfaces
+verified on-device:
+- **Real carrier SMS end-to-end through the kinds pipeline**: an actual incoming
+  SMS (+985000334, Persian promo body) forwarded Samsung→worker→Xiaomi; sender
+  feed shows the localized `SmsOut` title "Text forwarded to +985000334",
+  receiver feed shows `SmsIn` "Text from +985000334" with the **full body**
+  intact, and the receiver's high-priority `incoming`-channel notification
+  fired audibly.
+- **Uptime chip**: hero showed "Live 3s" from connect, ticking "57s" → "1m"
+  observed over 60 s; when the ISP's intermittent CF egress stall dropped the
+  socket, the chip correctly reset with the 3 s auto-reconnect ("Live 14s").
+- **Localized lifecycle titles live**: "Connected to relay server",
+  "Connection error", "Reconnecting (attempt 2)…" all rendered in the feed
+  during the natural disconnect storm.
+- **Transitions**: hub → pairing detail forward transition and the back
+  transition both verified (activity stayed resumed, hub re-rendered).
+- **Detail dialog**: tapping a feed row opened the v4 dialog (title + pairing
+  chip + relative + absolute timestamp).
+- MIUI blocked adb tap-injection on the Xiaomi (documented), so its dialog/row
+  interactions were read via UI dumps only; the Samsung covered the
+  interactive paths.
 
 ## 11. Four reported issues (2026-09-09)
 
@@ -845,10 +907,27 @@ The two-device E2E retest (2026-09-06) caught one runtime crash code review miss
   usable from networks that permit it (or via VPN); on those networks the
   app's DoH-first DNS handles the resolver hijack. LAN `ws://` stays the
   zero-VPN fallback.
-- [ ] **FCM wake fallback** — if the foreground service is killed, FCM data
-      messages can wake the receiver phone. The Firebase transport (req 16) removes
-      the server dependency but still needs a live process on both phones; FCM is
-      the missing piece for delivery after a hard kill on either transport.
+- [x] **FCM wake fallback (implemented + live verified 2026-09-13)**
+      — Android registers with the existing `nextnotif-5bcf9` Android app, advertises
+      receiver tokens after authentication, handles data-only wakes, and reconnects
+      for queued content. Both servers use small wake-only payloads (no SMS content)
+      and reject unauthenticated token registration. Paused/removed pairings and
+      global Stop suppress recovery; notification taps recover when background
+      starts are restricted. RTDB pairings now use independent named Firebase apps
+      so they cannot replace FCM's default app or sign each other out. Covers
+      relay-server receivers, not RTDB triggers or Android force-stop. See
+      `server/FCM.md`. 70/70 JVM tests, debug + release builds, Python + TLS + Worker
+      suites passed. Updated APK installed and launched on both Samsung API 26 and
+      Xiaomi API 35; both have cached FCM tokens. Worker update approved and deployed
+      to `nextnotif-relay.shayanshad.workers.dev`, version
+      `b0dcb6ba-066d-4af7-b87d-de0e2568dbca`, with existing FCM secret retained.
+      **Live device verification:** a labeled synthetic SMS sent to the offline
+      receiver returned `delivered:false, queued:1`; Xiaomi's service-start record
+      showed the FCM `PUSH_MESSAGING` allowance, the receiver reconnected, the full
+      synthetic content notification appeared, and the catch-up notice cleared.
+      Both phones then reported connected on `relay.amberdogeorgia.com`.
+      This proves the live push → service → queue → notification path; arbitrary
+      OEM process killing and Android force-stop recovery are not claimed.
 - [x] **Auth for real** — shared-secret model beyond the pairing code, implemented as
   server-issued per-device tokens (see requirement 15 + Verified above). Protocol:
   client `auth{token, code, device_token?}` → server `auth_ok{device_token}`.

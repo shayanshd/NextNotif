@@ -10,13 +10,12 @@ class AppStateTest {
 
     @Test
     fun pushPrependsAndCapsLogAt50() {
-        repeat(55) { AppState.push("IN", "msg-$it") }
+        repeat(55) { AppState.push(AppState.EventKind.Info("msg-$it")) }
         val log = AppState.log.value
         assertEquals(50, log.size)
         // Newest first: the 5 oldest pushes were dropped
         for (k in 0 until 50) {
-            assertEquals("msg-${54 - k}", log[k].message)
-            assertEquals("IN", log[k].tag)
+            assertEquals(AppState.EventKind.Info("msg-${54 - k}"), log[k].kind)
         }
     }
 
@@ -28,8 +27,10 @@ class AppStateTest {
             JSONObject().put("from", "+15551234567").put("body", body),
         )
         val entry = AppState.log.value.first()
-        assertEquals("IN", entry.tag)
-        assertEquals("SMS from +15551234567: " + body, entry.message)
+        assertEquals(
+            AppState.EventKind.SmsIn(from = "+15551234567", name = null, body = body),
+            entry.kind,
+        )
     }
 
     @Test
@@ -39,8 +40,10 @@ class AppStateTest {
             JSONObject().put("state", "ringing").put("number", "+15550001111"),
         )
         val entry = AppState.log.value.first()
-        assertEquals("IN", entry.tag)
-        assertEquals("Call ringing from +15550001111", entry.message)
+        assertEquals(
+            AppState.EventKind.CallIn(number = "+15550001111", name = null, state = "ringing"),
+            entry.kind,
+        )
     }
 
     @Test
@@ -48,16 +51,17 @@ class AppStateTest {
         val data = JSONObject().put("x", 1)
         AppState.pushIncoming("mms", data)
         val entry = AppState.log.value.first()
-        assertEquals("IN", entry.tag)
-        assertEquals("mms $data", entry.message)
+        assertEquals(AppState.EventKind.Info("mms $data"), entry.kind)
     }
 
     @Test
     fun pushOutgoingSmsFormats() {
         AppState.pushOutgoing("sms", JSONObject().put("from", "+15559998888"))
         val entry = AppState.log.value.first()
-        assertEquals("OUT", entry.tag)
-        assertEquals("SMS → +15559998888", entry.message)
+        assertEquals(
+            AppState.EventKind.SmsOut(from = "+15559998888", name = null),
+            entry.kind,
+        )
     }
 
     @Test
@@ -144,16 +148,16 @@ class AppStateTest {
 
     @Test
     fun pushWithCodeTagsEntryForPerPairingFiltering() {
-        AppState.push("WS", "connected as SENDER (code 111111)", "111111")
-        AppState.push("WS", "global note")
+        AppState.push(AppState.EventKind.Connected(firebase = false), "111111")
+        AppState.push(AppState.EventKind.Info("global note"))
         val log = AppState.log.value
-        assertEquals("global note", log[0].message)
+        assertEquals(AppState.EventKind.Info("global note"), log[0].kind)
         assertNull(log[0].code)
         assertEquals("111111", log[1].code)
         // Simulates the pairing detail screen's filter.
         val forPairing = log.filter { it.code == "111111" }
         assertEquals(1, forPairing.size)
-        assertEquals("connected as SENDER (code 111111)", forPairing[0].message)
+        assertEquals(AppState.EventKind.Connected(firebase = false), forPairing[0].kind)
     }
 
     @Test

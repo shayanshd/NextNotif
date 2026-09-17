@@ -79,19 +79,11 @@ class FirebaseRelay(
         private set
 
     private fun initApp(options: FirebaseOptions): FirebaseApp {
-        val existing = runCatching { FirebaseApp.getInstance() }.getOrNull()
-        if (
-            existing != null &&
-            existing.options.databaseUrl == cfg.databaseUrl &&
-            existing.options.apiKey == cfg.apiKey &&
-            existing.options.applicationId == cfg.appId
-        ) {
-            return existing
-        }
-        // Config changed since last run — the cached default app points at the
-        // old project/database, so replace it.
-        if (existing != null) runCatching { existing.delete() }
-        return FirebaseApp.initializeApp(context, options)
+        // Each pairing owns its auth lifecycle. Never replace the default app:
+        // FCM uses it, and signing out one relay must not disconnect another.
+        val name = firebaseRelayAppName(code, cfg)
+        return runCatching { FirebaseApp.getInstance(name) }.getOrNull()
+            ?: FirebaseApp.initializeApp(context, options, name)
     }
 
     fun start() {
@@ -115,7 +107,7 @@ class FirebaseRelay(
         // process the instance is already frozen, and a second
         // setPersistenceEnabled() throws. First use always precedes any
         // reference(), so configuring once per URL per process is safe.
-        if (persistenceConfigured.add(cfg.databaseUrl)) {
+        if (persistenceConfigured.add(app.name)) {
             db.setPersistenceEnabled(true)
         }
         database = db

@@ -57,6 +57,14 @@
         </receiver>
 
         <service
+            android:name=".RelayMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <service
             android:name=".RelayForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />

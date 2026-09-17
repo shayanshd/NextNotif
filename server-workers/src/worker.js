@@ -26,31 +26,6 @@ function isValidFcmToken(v) {
   );
 }
 
-// Title/body for the system-shown notification (the app process is dead in
-// that case, so the OS-rendered notification is the only record of the event).
-function notificationFor(evt) {
-  const data = evt && typeof evt.data === 'object' && evt.data !== null ? evt.data : {};
-  if (evt && evt.type === 'sms') {
-    const from = String(data.from || 'unknown');
-    const label = data.name ? `${data.name} (${from})` : from;
-    return { title: `NextNotif: Text from ${label}`, body: String(data.body || '').slice(0, 200) };
-  }
-  if (evt && evt.type === 'call') {
-    const number = String(data.number || 'unknown');
-    const label = data.name ? `${data.name} (${number})` : number;
-    const title =
-      data.state === 'RINGING'
-        ? `NextNotif: Incoming call from ${label}`
-        : data.state === 'OFFHOOK'
-          ? `NextNotif: Call from ${label} connected`
-          : data.state === 'IDLE'
-            ? `NextNotif: Call from ${label} ended`
-            : `NextNotif: Call ${data.state || ''} from ${label}`.trim();
-    return { title, body: number };
-  }
-  return { title: `NextNotif: ${evt && evt.type ? evt.type : 'event'}`, body: '' };
-}
-
 // Forward a request (WS upgrade or otherwise) to the pairing's DO instance.
 // The DO only understands the path form /ws/<role>/<code>, so normalize the
 // header-form /ws/<role> URL onto it before forwarding.
@@ -290,8 +265,7 @@ export class RelayPairing extends DurableObject {
 
   // Best-effort kill-recovery wake: the receiver's socket is dead, so a
   // high-priority FCM message goes to its registered token — the OS wakes the
-  // phone (system notification when the process is dead; the app's own
-  // branded notification when it is alive), the relay service reconnects, and
+  // app to show a catch-up notification; the relay service reconnects and
   // the queued events drain. Rate-limited per pairing/role. Never throws into
   // the relay path.
   async maybeFcmWake(role, evt) {
@@ -305,7 +279,6 @@ export class RelayPairing extends DurableObject {
       const last = (await this.getLastWake())[role] || 0;
       if (now - last < FCM_WAKE_COOLDOWN_MS) return;
       const sa = JSON.parse(saRaw);
-      const { title, body } = notificationFor(evt);
       const bearer = await this.fcmAccessToken(sa);
       const base = (this.env.FCM_SEND_URL || 'https://fcm.googleapis.com').replace(/\/$/, '');
       const resp = await fetch(`${base}/v1/projects/${sa.project_id}/messages:send`, {
@@ -314,14 +287,12 @@ export class RelayPairing extends DurableObject {
         body: JSON.stringify({
           message: {
             token,
-            notification: { title, body },
             data: {
               nn: '1',
               code: this.code,
-              type: evt && evt.type ? String(evt.type) : 'unknown',
-              data: JSON.stringify(evt && evt.data && typeof evt.data === 'object' ? evt.data : {}),
+              action: 'wake',
             },
-            android: { priority: 'high', defaultActivityName: 'com.nextnotif.app.MainActivity' },
+            android: { priority: 'high' },
           },
         }),
       });
@@ -502,7 +473,7 @@ export class RelayPairing extends DurableObject {
             await this.putNames(names);
           }
           // Optional FCM wake token for kill-recovery of this peer.
-          await this.storeFcmToken(role, msg.fcm_token);
+          entry.fcmToken = msg.fcm_token;
           // First message received: issue the one-time token.
           entry.stage = 'auth';
           await this.putPending(pending);
@@ -530,7 +501,7 @@ export class RelayPairing extends DurableObject {
         return;
       }
       // The auth message may carry a fresher FCM wake token than hello did.
-      await this.storeFcmToken(role, msg.fcm_token);
+      await this.storeFcmToken(role, isValidFcmToken(msg.fcm_token) ? msg.fcm_token : entry.fcmToken);
       // Device tokens: a presented token that belongs to this pairing is kept;
       // anything else (first connect, stale token, legacy client) gets a fresh
       // one. Code-only auth stays the bootstrap path; ongoing relays ride on

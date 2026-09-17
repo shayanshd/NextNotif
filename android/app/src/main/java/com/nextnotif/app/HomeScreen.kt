@@ -46,6 +46,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -86,8 +88,17 @@ fun HomeScreen(
     val connStates by AppState.connStates.collectAsState()
     val partnerStates by AppState.partnerStates.collectAsState()
     val pairingErrors by AppState.pairingErrors.collectAsState()
+    val connSince by AppState.connSince.collectAsState()
     val running = connState != AppState.ConnState.IDLE
     var showEntry by remember { mutableStateOf<AppState.Entry?>(null) }
+    // One tick per second while the relay is up, so the hero uptime chip tracks.
+    var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(running) {
+        while (running) {
+            nowTick = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -203,6 +214,8 @@ fun HomeScreen(
                     partnersOnline = partnerStates.values.count {
                         it.state == AppState.ConnState.CONNECTED || it.state == AppState.ConnState.LISTENING
                     },
+                    connSince = connSince,
+                    nowMs = nowTick,
                     onToggleService = onToggleService,
                 )
             }
@@ -264,6 +277,8 @@ private fun RelayHeroCard(
     connState: AppState.ConnState,
     pairingsCount: Int,
     partnersOnline: Int,
+    connSince: Long,
+    nowMs: Long,
     onToggleService: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
@@ -330,6 +345,12 @@ private fun RelayHeroCard(
                     ),
                     running = running,
                 )
+                if (running && connSince > 0) {
+                    HeroChip(
+                        label = stringResource(R.string.feed_uptime, uptimeLabel(connSince, nowMs)),
+                        running = running,
+                    )
+                }
                 if (running && pairingsCount > 0) {
                     HeroChip(
                         label = stringResource(R.string.home_chip_partners_online, partnersOnline),
@@ -748,114 +769,93 @@ internal data class LogVisual(
     val detail: String?,
 )
 
+/** Human label for an event participant: contact name when known, else number. */
+internal fun eventParticipant(name: String?, number: String): String =
+    when {
+        name != null && number != "unknown" -> "$name ($number)"
+        name != null -> name
+        else -> number
+    }
+
 @Composable
 internal fun entryVisual(entry: AppState.Entry): LogVisual {
     val cs = MaterialTheme.colorScheme
-    val msg = entry.message
     val neutral = LogVisual(
         icon = Icons.Default.Info,
         chip = cs.onSurfaceVariant.copy(alpha = 0.12f),
         onChip = cs.onSurfaceVariant,
-        title = msg,
+        title = "",
         detail = null,
     )
     val outChip = cs.secondaryContainer
     val onOutChip = cs.onSecondaryContainer
-    return when (entry.tag) {
-        "WS" -> {
-            val title = when {
-                msg.startsWith("connected as") -> "Connected to server"
-                msg.startsWith("connected via Firebase") -> "Connected via Firebase"
-                msg.startsWith("firebase connected") -> "Connected via Firebase"
-                msg.startsWith("reconnecting ") -> {
-                    val attempt = msg.substringAfter("(attempt ", "").substringBefore(")")
-                    if (attempt.all(Char::isDigit)) "Reconnecting (attempt $attempt)..." else "Reconnecting..."
-                }
-                msg.startsWith("closed ") -> "Connection closed"
-                msg.startsWith("firebase ") && msg.contains("disconnected") -> "Connection closed"
-                msg.startsWith("error ") -> "Connection error"
-                msg.startsWith("flushed ") -> {
-                    val count = msg.substringAfter("flushed ", "").substringBefore(" queued")
-                    if (count.all(Char::isDigit)) "Sent $count queued event(s)" else "Sent queued event(s)"
-                }
-                else -> msg
+    return when (val kind = entry.kind) {
+        is AppState.EventKind.SmsIn -> LogVisual(
+            icon = Icons.Default.Notifications,
+            chip = cs.primaryContainer,
+            onChip = cs.onPrimaryContainer,
+            title = stringResource(R.string.feed_sms_in, eventParticipant(kind.name, kind.from)),
+            detail = kind.body.ifEmpty { null },
+        )
+        is AppState.EventKind.CallIn -> {
+            val participant = eventParticipant(kind.name, kind.number)
+            val title = when (kind.state) {
+                "RINGING" -> stringResource(R.string.feed_call_in_ringing, participant)
+                "OFFHOOK" -> stringResource(R.string.feed_call_in_offhook, participant)
+                "IDLE" -> stringResource(R.string.feed_call_in_idle, participant)
+                else -> stringResource(R.string.feed_call_in_other, kind.state, participant)
             }
-            neutral.copy(title = title)
-        }
-        "IN" -> when {
-            msg.startsWith("SMS from ") -> {
-                val rest = msg.substringAfter("SMS from ", "")
-                val sep = rest.indexOf(": ")
-                if (sep > 0) {
-                    LogVisual(
-                        icon = Icons.Default.Notifications,
-                        chip = cs.primaryContainer,
-                        onChip = cs.onPrimaryContainer,
-                        title = "Text from ${rest.substring(0, sep)}",
-                        detail = rest.substring(sep + 2).ifEmpty { null },
-                    )
-                } else {
-                    neutral
-                }
-            }
-            msg.startsWith("Call ") -> {
-                val state = msg.substringAfter("Call ", "").substringBefore(" from ")
-                val number = msg.substringAfter(" from ", "")
-                val title = when (state) {
-                    "RINGING" -> "Incoming call from $number"
-                    "OFFHOOK" -> "Call connected from $number"
-                    "IDLE" -> "Call ended from $number"
-                    else -> null
-                }
-                if (title != null) {
-                    LogVisual(
-                        icon = Icons.Default.Phone,
-                        chip = cs.secondaryContainer,
-                        onChip = cs.onSecondaryContainer,
-                        title = title,
-                        detail = null,
-                    )
-                } else {
-                    neutral
-                }
-            }
-            else -> neutral
-        }
-        "OUT" -> when {
-            msg.startsWith("SMS → ") -> LogVisual(
-                icon = Icons.Default.Send,
-                chip = outChip,
-                onChip = onOutChip,
-                title = "Text forwarded: ${msg.substringAfter("SMS → ", "")}",
+            LogVisual(
+                icon = Icons.Default.Phone,
+                chip = cs.secondaryContainer,
+                onChip = cs.onSecondaryContainer,
+                title = title,
                 detail = null,
             )
-            msg.startsWith("queued sms") -> LogVisual(
-                icon = Icons.Default.Send,
-                chip = outChip,
-                onChip = onOutChip,
-                title = "Text queued (offline)",
-                detail = null,
-            )
-            msg.startsWith("queued call") -> LogVisual(
-                icon = Icons.Default.Send,
-                chip = outChip,
-                onChip = onOutChip,
-                title = "Call queued (offline)",
-                detail = null,
-            )
-            msg.startsWith("Call ") && msg.contains(" → ") -> {
-                val state = msg.substringAfter("Call ", "").substringBefore(" → ")
-                val number = msg.substringAfter(" → ", "")
-                LogVisual(
-                    icon = Icons.Default.Send,
-                    chip = outChip,
-                    onChip = onOutChip,
-                    title = "Call state forwarded: $state ($number)",
-                    detail = null,
-                )
-            }
-            else -> neutral
         }
-        else -> neutral
+        is AppState.EventKind.SmsOut -> LogVisual(
+            icon = Icons.Default.Send,
+            chip = outChip,
+            onChip = onOutChip,
+            title = stringResource(R.string.feed_sms_out, eventParticipant(kind.name, kind.from)),
+            detail = null,
+        )
+        is AppState.EventKind.CallOut -> LogVisual(
+            icon = Icons.Default.Send,
+            chip = outChip,
+            onChip = onOutChip,
+            title = stringResource(R.string.feed_call_out, kind.state, kind.number),
+            detail = null,
+        )
+        is AppState.EventKind.Connected -> LogVisual(
+            icon = Icons.Default.Info,
+            chip = neutral.chip,
+            onChip = neutral.onChip,
+            title = stringResource(
+                if (kind.firebase) R.string.feed_connected_fb else R.string.feed_connected_ws
+            ),
+            detail = null,
+        )
+        is AppState.EventKind.Closed -> neutral.copy(title = stringResource(R.string.feed_closed))
+        is AppState.EventKind.Failed -> neutral.copy(title = stringResource(R.string.feed_failed))
+        is AppState.EventKind.Reconnecting -> neutral.copy(
+            title = stringResource(R.string.feed_reconnecting, kind.attempt),
+        )
+        is AppState.EventKind.Flushed -> neutral.copy(
+            title = if (kind.count == 1) {
+                stringResource(R.string.feed_flushed_one)
+            } else {
+                stringResource(R.string.feed_flushed, kind.count)
+            },
+        )
+        is AppState.EventKind.Queued -> neutral.copy(
+            title = when (kind.type) {
+                "sms" -> stringResource(R.string.feed_queued_sms)
+                "call" -> stringResource(R.string.feed_queued_call)
+                else -> stringResource(R.string.feed_queued_other, kind.type)
+            },
+        )
+        AppState.EventKind.StillWaiting -> neutral.copy(title = stringResource(R.string.feed_still_waiting))
+        is AppState.EventKind.Info -> neutral.copy(title = kind.message)
     }
 }

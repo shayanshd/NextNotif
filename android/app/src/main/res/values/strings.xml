@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="wake_title">New activity from %1$s</string>
+    <string name="wake_body">Open NextNotif to retrieve queued texts and calls.</string>
     <string name="app_name">NextNotif</string>
     <string name="notif_channel_relay">Relay</string>
     <string name="notif_channel_incoming">Forwarded alerts</string>
@@ -67,6 +69,28 @@
     <string name="home_onboarding_cta">Add your first pairing</string>
     <string name="home_this_phone">This phone</string>
     <string name="home_partner">Partner</string>
+
+    <!-- Structured activity feed titles (rendered from EventKind, not parsed
+         out of log strings). -->
+    <string name="feed_sms_in">Text from %1$s</string>
+    <string name="feed_call_in_ringing">Incoming call from %1$s</string>
+    <string name="feed_call_in_offhook">Call connected from %1$s</string>
+    <string name="feed_call_in_idle">Call ended from %1$s</string>
+    <string name="feed_call_in_other">Call %1$s from %2$s</string>
+    <string name="feed_sms_out">Text forwarded to %1$s</string>
+    <string name="feed_call_out">Call %1$s forwarded (%2$s)</string>
+    <string name="feed_connected_ws">Connected to relay server</string>
+    <string name="feed_connected_fb">Connected via Firebase</string>
+    <string name="feed_closed">Connection closed</string>
+    <string name="feed_failed">Connection error</string>
+    <string name="feed_reconnecting">Reconnecting (attempt %1$d)…</string>
+    <string name="feed_flushed">Sent %1$d queued event(s)</string>
+    <string name="feed_flushed_one">Sent 1 queued event</string>
+    <string name="feed_queued_sms">Text queued (offline)</string>
+    <string name="feed_queued_call">Call queued (offline)</string>
+    <string name="feed_queued_other">%1$s queued (offline)</string>
+    <string name="feed_still_waiting">Some queued event(s) still waiting</string>
+    <string name="feed_uptime">Live %1$s</string>
 
     <string name="menu_add_pairing">Add pairing</string>
     <string name="menu_battery">Battery exemption</string>

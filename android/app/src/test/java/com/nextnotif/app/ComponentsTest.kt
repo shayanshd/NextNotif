@@ -73,4 +73,43 @@ class ComponentsTest {
         assertEquals(null, partnerStatusFrom(json, Role.SENDER).second)
         assertEquals(null, partnerStatusFrom(json, Role.RECEIVER).second)
     }
+
+    @Test
+    fun uptimeFormatsSecondsUnderAMinute() {
+        assertEquals("0s", uptimeLabel(0L, 5_000L)) // 0 = never connected
+        assertEquals("45s", uptimeLabel(1_000L, 46_000L))
+    }
+
+    @Test
+    fun uptimeFormatsMinutesUnderAnHour() {
+        assertEquals("1m", uptimeLabel(1_000L, 61_000L))
+        assertEquals("59m", uptimeLabel(1_000L, 1_000L + 59 * 60_000L + 59_000L))
+    }
+
+    @Test
+    fun uptimeFormatsHoursWithZeroPaddedMinutes() {
+        assertEquals("1h 05m", uptimeLabel(1_000L, 1_000L + 65 * 60_000L))
+        assertEquals("3h 00m", uptimeLabel(1_000L, 1_000L + 3 * 3_600_000L))
+        assertEquals("23h 59m", uptimeLabel(1_000L, 1_000L + 23 * 3_600_000L + 59 * 60_000L))
+    }
+
+    @Test
+    fun uptimeFormatsDaysWithHours() {
+        assertEquals("1d 2h", uptimeLabel(1_000L, 1_000L + 26 * 3_600_000L))
+        assertEquals("2d 5h", uptimeLabel(1_000L, 1_000L + 53 * 3_600_000L))
+    }
+
+    @Test
+    fun uptimeClampsNegativeAndFutureTimestamps() {
+        assertEquals("0s", uptimeLabel(-5L, 0L))
+        assertEquals("0s", uptimeLabel(10_000L, 5_000L))
+    }
+
+    @Test
+    fun participantPrefersNameThenNumberThenUnknown() {
+        assertEquals("Samin (+1234567890)", eventParticipant("Samin", "+1234567890"))
+        assertEquals("Samin", eventParticipant("Samin", "unknown"))
+        assertEquals("+1234567890", eventParticipant(null, "+1234567890"))
+        assertEquals("unknown", eventParticipant(null, "unknown"))
+    }
 }

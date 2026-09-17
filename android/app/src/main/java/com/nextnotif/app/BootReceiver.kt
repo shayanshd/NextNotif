@@ -10,7 +10,7 @@ class BootReceiver : BroadcastReceiver() {
         val action = intent.action
         if (action != Intent.ACTION_BOOT_COMPLETED && action != Intent.ACTION_LOCKED_BOOT_COMPLETED) return
         val session = SessionStore.load(context)
-        if (session.pairings.isEmpty()) return
+        if (!RelayWake.requested(context) || session.pairings.none { it.enabled }) return
         Log.i("BootReceiver", "Restarting relay after boot")
         RelayForegroundService.Controller.start(context)
     }

@@ -257,8 +257,7 @@ async def _ws_session(ws: WebSocket, role: str, path_code: Optional[str]) -> Non
                 pairing.receiver_name = name
 
         # Optional FCM wake token for kill-recovery of this peer.
-        if _store_fcm_token(pairing, role, first_msg.get("fcm_token")):
-            registry.save()
+        pending_fcm_token = first_msg.get("fcm_token")
 
         await ws.send_text(json.dumps({"type": "handshake", "token": token}))
 
@@ -291,7 +290,7 @@ async def _ws_session(ws: WebSocket, role: str, path_code: Optional[str]) -> Non
                 pairing.tokens = pairing.tokens[-MAX_DEVICE_TOKENS:]
             registry.save()
         # The auth message may carry a fresher FCM wake token than hello did.
-        if _store_fcm_token(pairing, role, auth.get("fcm_token")):
+        if _store_fcm_token(pairing, role, auth.get("fcm_token") if fcm.valid_token(auth.get("fcm_token")) else pending_fcm_token):
             registry.save()
         await ws.send_text(json.dumps({"type": "auth_ok", "device_token": issued}))
 

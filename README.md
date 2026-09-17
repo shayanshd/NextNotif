@@ -2,6 +2,11 @@
 
 Forward SMS and incoming-call info from one Android phone to another, relayed through a small FastAPI server. Both phones pair with the server using a 6-digit code.
 
+The core SMS/call relay MVP is implemented. The Android app also includes a
+receiver wake fallback through the existing `nextnotif-5bcf9` Firebase Android
+registration. See [FCM setup and delivery behavior](server/FCM.md) for backend
+credentials, stop behavior, and verification limits.
+
 ## Layout
 
 - `server/` — FastAPI + WebSocket relay

@@ -295,6 +295,23 @@ fun timeAgo(ts: Long, nowMs: Long = System.currentTimeMillis()): String {
     }
 }
 
+/** Relay uptime for the hero chip: "45s" under a minute, "12m" under an hour,
+ *  "3h 05m" under a day, else "2d 5h". Pure for JVM tests. */
+fun uptimeLabel(sinceMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    if (sinceMs <= 0L || nowMs <= sinceMs) return "0s"
+    var seconds = (nowMs - sinceMs) / 1000L
+    if (seconds < 60) return "${seconds}s"
+    val minutes = seconds / 60
+    if (minutes < 60) return "${minutes}m"
+    val hours = minutes / 60
+    if (hours < 24) {
+        val rem = minutes % 60
+        return "${hours}h ${rem.toString().padStart(2, '0')}m"
+    }
+    val days = hours / 24
+    return "${days}d ${hours % 24}h"
+}
+
 /** Prefix for the partner status pill: the peer's advertised device name
  *  ("Xiaomi 23049PCD8G") when known, null to fall back to "Partner".
  *  Truncated so the pill still fits the card. */

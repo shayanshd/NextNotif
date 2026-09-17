@@ -12,6 +12,12 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
@@ -56,6 +62,7 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         refreshPermGate()
+        resumeFromWake()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,63 +98,89 @@ class MainActivity : ComponentActivity() {
                         onRequest = { requestMissingPerms() },
                         onOpenSettings = { openAppSettings() },
                     )
-                    else -> when (val screen = nav.value.last()) {
-                        AppScreen.Home -> HomeScreen(
-                            pairings = session.pairings,
-                            onToggleService = {
-                                val s = AppState.conn.value
-                                if (
-                                    s == AppState.ConnState.IDLE ||
-                                    s == AppState.ConnState.DISCONNECTED ||
-                                    s == AppState.ConnState.CONNECTING
-                                ) {
-                                    handleAction(UiAction.StartService)
+                    else -> {
+                        // Direction-aware transitions: navigating deeper slides
+                        // content in from the right; going back slides it back
+                        // out. The home screen never animates in from the left.
+                        AnimatedContent(
+                            targetState = nav.value.last(),
+                            transitionSpec = {
+                                val depth = { s: AppScreen ->
+                                    when (s) {
+                                        AppScreen.Home -> 0
+                                        is AppScreen.Detail -> 1
+                                        is AppScreen.AddEdit -> 2
+                                    }
+                                }
+                                if (depth(targetState) >= depth(initialState)) {
+                                    (slideInHorizontally { it } + fadeIn())
+                                        .togetherWith(slideOutHorizontally { -it } + fadeOut())
                                 } else {
-                                    handleAction(UiAction.StopService)
+                                    (slideInHorizontally { -it } + fadeIn())
+                                        .togetherWith(slideOutHorizontally { it } + fadeOut())
                                 }
                             },
-                            onBattery = { handleAction(UiAction.RequestBatteryExemption) },
-                            onCallScreening = { handleAction(UiAction.OpenCallScreeningSettings) },
-                            onReset = { showResetConfirm.value = true },
-                            notifPermMissing = notifPermMissing.value,
-                            onRequestNotifPerm = { requestNotifPerm() },
-                            onAddPairing = { nav.value = nav.value + AppScreen.AddEdit(null) },
-                            onOpenPairing = { p -> nav.value = nav.value + AppScreen.Detail(p.code) },
-                            onEditPairing = { p -> nav.value = nav.value + AppScreen.AddEdit(p.code) },
-                            onRemovePairing = { removeTarget.value = it },
-                            onTogglePairing = { p -> handleAction(UiAction.SetPairingEnabled(p.code, !p.enabled)) },
-                        )
-                        is AppScreen.Detail -> {
-                            val p = session.pairings.firstOrNull { it.code == screen.code }
-                            if (p != null) {
-                                PairingDetailScreen(
-                                    pairing = p,
-                                    onBack = { nav.value = nav.value.dropLast(1) },
-                                    onEdit = { nav.value = nav.value + AppScreen.AddEdit(p.code) },
-                                    onRemove = { removeTarget.value = p },
-                                    onToggle = { handleAction(UiAction.SetPairingEnabled(p.code, !p.enabled)) },
+                            label = "screen",
+                        ) { screen ->
+                            when (screen) {
+                                AppScreen.Home -> HomeScreen(
+                                    pairings = session.pairings,
+                                    onToggleService = {
+                                        val s = AppState.conn.value
+                                        if (
+                                            s == AppState.ConnState.IDLE ||
+                                            s == AppState.ConnState.DISCONNECTED ||
+                                            s == AppState.ConnState.CONNECTING
+                                        ) {
+                                            handleAction(UiAction.StartService)
+                                        } else {
+                                            handleAction(UiAction.StopService)
+                                        }
+                                    },
+                                    onBattery = { handleAction(UiAction.RequestBatteryExemption) },
+                                    onCallScreening = { handleAction(UiAction.OpenCallScreeningSettings) },
+                                    onReset = { showResetConfirm.value = true },
+                                    notifPermMissing = notifPermMissing.value,
+                                    onRequestNotifPerm = { requestNotifPerm() },
+                                    onAddPairing = { nav.value = nav.value + AppScreen.AddEdit(null) },
+                                    onOpenPairing = { p -> nav.value = nav.value + AppScreen.Detail(p.code) },
+                                    onEditPairing = { p -> nav.value = nav.value + AppScreen.AddEdit(p.code) },
+                                    onRemovePairing = { removeTarget.value = it },
+                                    onTogglePairing = { p -> handleAction(UiAction.SetPairingEnabled(p.code, !p.enabled)) },
                                 )
-                            } else {
-                                // Pairing was removed behind us: fall back to home.
-                                nav.value = listOf(AppScreen.Home)
-                            }
-                        }
-                        is AppScreen.AddEdit -> {
-                            val p = screen.code?.let { c -> session.pairings.firstOrNull { it.code == c } }
-                            AddEditPairingScreen(
-                                editing = p,
-                                busy = connecting.value,
-                                busyLabel = if (connecting.value) stringResource(R.string.setup_connecting) else null,
-                                error = uiError.value,
-                                onBack = { nav.value = nav.value.dropLast(1) },
-                                onGenerateCode = { server, onResult -> generateCode(server, onResult) },
-                                onSubmit = { label, role, code, server, transport, fbConfig ->
-                                    uiError.value = null
-                                    handleAction(
-                                        UiAction.UpsertPairing(label, role, code, server, transport, fbConfig),
+                                is AppScreen.Detail -> {
+                                    val p = session.pairings.firstOrNull { it.code == screen.code }
+                                    if (p != null) {
+                                        PairingDetailScreen(
+                                            pairing = p,
+                                            onBack = { nav.value = nav.value.dropLast(1) },
+                                            onEdit = { nav.value = nav.value + AppScreen.AddEdit(p.code) },
+                                            onRemove = { removeTarget.value = p },
+                                            onToggle = { handleAction(UiAction.SetPairingEnabled(p.code, !p.enabled)) },
+                                        )
+                                    } else {
+                                        // Pairing was removed behind us: fall back to home.
+                                        nav.value = listOf(AppScreen.Home)
+                                    }
+                                }
+                                is AppScreen.AddEdit -> {
+                                    val p = screen.code?.let { c -> session.pairings.firstOrNull { it.code == c } }
+                                    AddEditPairingScreen(
+                                        editing = p,
+                                        busy = connecting.value,
+                                        busyLabel = if (connecting.value) stringResource(R.string.setup_connecting) else null,
+                                        error = uiError.value,
+                                        onBack = { nav.value = nav.value.dropLast(1) },
+                                        onGenerateCode = { server, onResult -> generateCode(server, onResult) },
+                                        onSubmit = { label, role, code, server, transport, fbConfig ->
+                                            uiError.value = null
+                                            handleAction(
+                                                UiAction.UpsertPairing(label, role, code, server, transport, fbConfig),
+                                            )
+                                        },
                                     )
-                                },
-                            )
+                                }
+                            }
                         }
                     }
                 }
@@ -450,10 +483,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        resumeFromWake()
+    }
+
     override fun onResume() {
         super.onResume()
         refreshNotifPermMissing()
         refreshPermGate()
+        resumeFromWake()
+    }
+
+    private fun resumeFromWake() {
+        val code = intent?.getStringExtra("wake_code") ?: return
+        if (missingRawPerms().isNotEmpty()) return
+        intent.removeExtra("wake_code")
+        val pairing = RelayWake.receiver(
+            mapOf("nn" to "1", "action" to "wake", "code" to code),
+            SessionStore.load(this), RelayWake.requested(this),
+        ) ?: return
+        IncomingNotifier.clearWake(this, pairing.code)
+        RelayForegroundService.Controller.start(this)
     }
 }
 

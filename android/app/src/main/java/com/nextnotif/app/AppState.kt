@@ -15,10 +15,49 @@ object AppState {
         val name: String? = null,
     )
 
+    /** What happened, as data — the feed renders titles from these fields
+     *  (localized, no log-string parsing) instead of pattern-matching text. */
+    sealed interface EventKind {
+        /** An SMS arrived from the partner phone. */
+        data class SmsIn(val from: String, val name: String?, val body: String) : EventKind
+
+        /** Incoming call state update from the partner phone. */
+        data class CallIn(val number: String, val name: String?, val state: String) : EventKind
+
+        /** This phone forwarded an SMS to a sender pairing. */
+        data class SmsOut(val from: String, val name: String?) : EventKind
+
+        /** This phone forwarded a call state to a sender pairing. */
+        data class CallOut(val number: String, val name: String?, val state: String) : EventKind
+
+        /** Own relay link connected. */
+        data class Connected(val firebase: Boolean) : EventKind
+
+        /** Own relay link closed (reason may be null). */
+        data class Closed(val reason: String?) : EventKind
+
+        /** Own relay link failed with an error. */
+        data class Failed(val error: String) : EventKind
+
+        /** Own relay link is retrying after a drop. */
+        data class Reconnecting(val attempt: Int, val delayMs: Long) : EventKind
+
+        /** Queued offline events were delivered after a reconnect. */
+        data class Flushed(val count: Int) : EventKind
+
+        /** An event was parked in the offline outbox (no route right now). */
+        data class Queued(val type: String) : EventKind
+
+        /** Retryable flush failure: some queued events still waiting. */
+        data object StillWaiting : EventKind
+
+        /** Anything else (generic relay lifecycle noise). */
+        data class Info(val message: String) : EventKind
+    }
+
     data class Entry(
         val ts: Long,
-        val tag: String,
-        val message: String,
+        val kind: EventKind,
         // The pairing this event belongs to, when it does. Global events
         // (no pairing context) carry null and show up in every view.
         val code: String? = null,
@@ -109,52 +148,42 @@ object AppState {
         _lastError.value = message
     }
 
-    fun push(tag: String, message: String, code: String? = null) {
-        val entry = Entry(System.currentTimeMillis(), tag, message, code)
+    fun push(kind: EventKind, code: String? = null) {
+        val entry = Entry(System.currentTimeMillis(), kind, code)
         _log.value = (listOf(entry) + _log.value).take(50)
     }
 
     fun pushIncoming(type: String, data: JSONObject, code: String? = null) {
-        when (type) {
-            "sms" -> {
-                val from = data.optString("from")
-                val name = data.optString("name").ifBlank { null }
-                val label = if (name != null) "$name ($from)" else from
-                push("IN", "SMS from $label: ${data.optString("body")}", code)
-            }
-            "call" -> {
-                val number = data.optString("number")
-                val name = data.optString("name").ifBlank { null }
-                val label = when {
-                    name != null && number != "unknown" -> "$name ($number)"
-                    name != null -> name
-                    else -> number
-                }
-                push("IN", "Call ${data.optString("state")} from $label", code)
-            }
-            else -> push("IN", "$type $data", code)
+        val kind = when (type) {
+            "sms" -> EventKind.SmsIn(
+                from = data.optString("from"),
+                name = data.optString("name").ifBlank { null },
+                body = data.optString("body"),
+            )
+            "call" -> EventKind.CallIn(
+                number = data.optString("number"),
+                name = data.optString("name").ifBlank { null },
+                state = data.optString("state"),
+            )
+            else -> EventKind.Info("$type $data")
         }
+        push(kind, code)
     }
 
     fun pushOutgoing(type: String, data: JSONObject, code: String? = null) {
-        when (type) {
-            "sms" -> {
-                val from = data.optString("from")
-                val name = data.optString("name").ifBlank { null }
-                push("OUT", "SMS → ${if (name != null) "$name ($from)" else from}", code)
-            }
-            "call" -> {
-                val number = data.optString("number")
-                val name = data.optString("name").ifBlank { null }
-                val label = when {
-                    name != null && number != "unknown" -> "$name ($number)"
-                    name != null -> name
-                    else -> number
-                }
-                push("OUT", "Call ${data.optString("state")} → $label", code)
-            }
-            else -> push("OUT", "$type $data", code)
+        val kind = when (type) {
+            "sms" -> EventKind.SmsOut(
+                from = data.optString("from"),
+                name = data.optString("name").ifBlank { null },
+            )
+            "call" -> EventKind.CallOut(
+                number = data.optString("number"),
+                name = data.optString("name").ifBlank { null },
+                state = data.optString("state"),
+            )
+            else -> EventKind.Info("$type $data")
         }
+        push(kind, code)
     }
 }
 

@@ -12,7 +12,18 @@ import androidx.core.content.ContextCompat
 
 object IncomingNotifier {
 
-    private fun notify(ctx: Context, title: String, body: String, id: Int) {
+    fun notifyWake(ctx: Context, pairing: PairingInfo) {
+        notify(ctx, ctx.getString(R.string.wake_title, pairing.displayName),
+            ctx.getString(R.string.wake_body), wakeId(pairing.code), pairing.code)
+    }
+
+    fun clearWake(ctx: Context, code: String) {
+        (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(wakeId(code))
+    }
+
+    private fun wakeId(code: String): Int = 10_000 + (code.hashCode() and 0x0FFFFFFF)
+
+    private fun notify(ctx: Context, title: String, body: String, id: Int, wakeCode: String? = null) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
@@ -22,8 +33,10 @@ object IncomingNotifier {
         }
         val pi = PendingIntent.getActivity(
             ctx, id,
-            Intent(ctx, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE,
+            Intent(ctx, MainActivity::class.java).apply {
+                wakeCode?.let { putExtra("wake_code", it) }
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val n = NotificationCompat.Builder(ctx, Notifications.CHANNEL_INCOMING)
             .setSmallIcon(R.drawable.ic_stat_relay)

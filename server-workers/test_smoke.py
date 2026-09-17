@@ -834,6 +834,12 @@ async def fc_connect(base, path, code, fcm_token=None, device_name=None):
 async def check_fcm_register(dev, fcm_token):
     """fcm_token on auth is stored per role and reported by /status."""
     code = await fcm_fresh_code(dev)
+    unauth = await websockets.connect(f"{dev.ws_base}/ws/receiver/{code}")
+    await unauth.send(json.dumps({"type": "hello", "fcm_token": fcm_token}))
+    assert json.loads(await unauth.recv())["type"] == "handshake"
+    assert (await fcm_status(dev, code))["receiver_has_fcm"] is False
+    await unauth.close()
+    assert await fcm_wait_status(dev, code, {"receiver_connected": False})
     ws = await fc_connect(dev, f"/ws/receiver/{code}", code, fcm_token=fcm_token)
     await ws.close()
     assert await fcm_wait_status(dev, code, {"receiver_connected": False}), "receiver slot not freed"
@@ -866,10 +872,9 @@ async def check_fcm_wake_offline(base, stub, public_key, code, fcm_token):
     assert msg["auth"] == "Bearer stub-access-token", msg["auth"]
     m = msg["body"]["message"]
     assert m["token"] == fcm_token, m
-    assert m["notification"]["body"] == "wake me up", m
-    assert "+15550001111" in m["notification"]["title"], m
-    assert m["data"]["nn"] == "1" and m["data"]["code"] == code and m["data"]["type"] == "sms", m
-    assert json.loads(m["data"]["data"])["body"] == "wake me up", m
+    assert "notification" not in m, m
+    assert m["data"] == {"nn": "1", "code": code, "action": "wake"}, m
+    assert m["android"] == {"priority": "high"}, m
     assert m["android"]["priority"] == "high", m
 
     call = stub.token_calls[-1]
