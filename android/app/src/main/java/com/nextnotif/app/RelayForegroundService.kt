@@ -320,6 +320,10 @@ class RelayForegroundService : Service() {
         AppState.setPairingError(pairing.code, null)
         AppState.push("WS", "sender uplink ready (code ${pairing.code})", pairing.code)
         Log.i(TAG, "sender uplink ready code=${pairing.code}; no persistent socket")
+        // FCM senders have no socket handshake carrying battery metadata. Send
+        // the first reading as soon as the uplink is ready so a receiver does
+        // not wait for the two-minute status poll after startup/reconnect.
+        scope.launch { reportBatteryStatus(pairing) }
     }
 
     /** Stop one pairing's relay machinery and clear its UI state. */
@@ -786,8 +790,13 @@ class RelayForegroundService : Service() {
         conn.setRequestProperty("X-NextNotif-Role", "sender")
         conn.setRequestProperty("X-NextNotif-Token", pairing.deviceToken)
         conn.outputStream.use { it.write(JSONObject().put("battery_percent", battery).toString().toByteArray()) }
-        conn.inputStream.close()
-        lastBatteryReports[pairing.code] = battery to now
+        if (conn.responseCode in 200..299) {
+            conn.inputStream.close()
+            lastBatteryReports[pairing.code] = battery to now
+        } else {
+            conn.errorStream?.close()
+            Log.w(TAG, "battery report rejected for ${pairing.code}: HTTP ${conn.responseCode}")
+        }
     }
 
     private fun notifyLowSenderBattery(pairing: PairingInfo, battery: Int?) {
