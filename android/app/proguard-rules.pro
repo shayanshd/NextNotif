@@ -19,6 +19,7 @@
 # -keep rules are required. If R8 ever reports missing classes or
 # "unable to resolve" warnings, add targeted rules below.
 
-# --- app-specific rules (none currently needed) ---
-# Example:
-# -keep class com.nextnotif.app.SomeClass { *; }
+# WebRTC's Java audio module crosses into a native audio thread and uses
+# callback classes through the library boundary. Keep it stable in release
+# builds for older Samsung firmware.
+-keep class org.webrtc.** { *; }

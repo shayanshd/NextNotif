@@ -19,7 +19,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
+            // Keep the WebRTC audio bridge unminified. Older Samsung Android
+            // builds abort inside the native audio thread when R8 rewrites
+            // the JavaAudioDeviceModule integration.
+            isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
