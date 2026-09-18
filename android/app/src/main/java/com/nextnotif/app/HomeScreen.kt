@@ -249,14 +249,16 @@ fun HomeScreen(
                                     onCallScreening()
                                 },
                             )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_gateway_diagnostics)) },
-                                leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
-                                onClick = {
-                                    menuOpen = false
-                                    onGatewayDiagnostics()
-                                },
-                            )
+                            if (BuildConfig.DEBUG) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.menu_gateway_diagnostics)) },
+                                    leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                                    onClick = {
+                                        menuOpen = false
+                                        onGatewayDiagnostics()
+                                    },
+                                )
+                            }
                             DropdownMenuItem(
                                 text = {
                                     Text(

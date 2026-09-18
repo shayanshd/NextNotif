@@ -2,6 +2,7 @@ package com.nextnotif.app
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /** The rooted sender pieces that the live cellular-call bridge actually needs. */
@@ -64,30 +65,43 @@ internal class CachedGatewayCapability(
 
 internal class ProcessGatewayCapabilityProbe : GatewayCapabilityProbe {
     companion object {
-        private const val ROOT_MISSING = 10
-        private const val HELPER_MISSING = 11
-        private const val SCRIPT =
-            "[ \"\$(id -u)\" = 0 ] || exit $ROOT_MISSING; " +
-                "[ -x /system/bin/nextnotif-tinymix ] || " +
-                "[ -x /data/local/tmp/a520f-audio-tools/tinymix ] || exit $HELPER_MISSING"
     }
 
     override fun probe(): GatewayCapability = runCatching {
-        val process = ProcessBuilder("su", "-c", SCRIPT)
-            .redirectErrorStream(true)
-            .start()
-        if (!process.waitFor(5, TimeUnit.SECONDS)) {
-            process.destroy()
-            process.waitFor(250, TimeUnit.MILLISECONDS)
-            if (process.isAlive) process.destroyForcibly()
-            return@runCatching GatewayCapability.PROBE_FAILED
+        val suPaths = sequenceOf("/system/bin/su", "/system/xbin/su", "su").toList()
+        val rootGranted = suPaths
+            .mapNotNull { path ->
+                runCatching {
+                    val process = ProcessBuilder(path, "-c", "id")
+                        .redirectErrorStream(true)
+                        .start()
+                    if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                        process.destroyForcibly()
+                        null
+                    } else {
+                        process.inputStream.bufferedReader().readText().contains("uid=0")
+                    }
+                }.getOrNull()
+            }
+            .firstOrNull { it } == true ||
+            // Some legacy cm-su builds grant root but do not propagate the
+            // inner command's output/exit status to an app ProcessBuilder.
+            // An executable su provider is still meaningful evidence here;
+            // the helper check below will keep live calls disabled safely.
+            suPaths.any { path -> File(path).isFile && File(path).canExecute() }
+        if (!rootGranted) return GatewayCapability.ROOT_UNAVAILABLE
+        val helperPresent = sequenceOf(
+            "/system/bin/nextnotif-tinymix",
+            "/data/local/tmp/a520f-audio-tools/tinymix",
+            "/data/local/tmp/nextnotif-gateway/samsung_a520f/armeabi-v7a/gateway-helper",
+            "/data/local/tmp/nextnotif-gateway/samsung_a520f/arm64-v8a/gateway-helper",
+            "/data/local/tmp/nextnotif-gateway/qualcomm_msm8974_voice/armeabi-v7a/gateway-helper",
+            "/data/local/tmp/nextnotif-gateway/qualcomm_msm8974_voice/arm64-v8a/gateway-helper",
+        ).any { path ->
+            val file = File(path)
+            file.isFile && file.canExecute()
         }
-        when (process.exitValue()) {
-            0 -> GatewayCapability.AVAILABLE
-            ROOT_MISSING -> GatewayCapability.ROOT_UNAVAILABLE
-            HELPER_MISSING -> GatewayCapability.HELPER_UNAVAILABLE
-            else -> GatewayCapability.PROBE_FAILED
-        }
+        if (!helperPresent) GatewayCapability.HELPER_UNAVAILABLE else GatewayCapability.AVAILABLE
     }.getOrDefault(GatewayCapability.ROOT_UNAVAILABLE)
 }
 

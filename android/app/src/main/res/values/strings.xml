@@ -39,7 +39,7 @@
     <string name="setup_fb_recommended">Recommended</string>
     <string name="setup_live_call_label">Optional live calls</string>
     <string name="setup_live_call_title">Live call relay (beta)</string>
-    <string name="setup_live_call_helper">For a rooted Samsung Galaxy A5 SM-A520F reference gateway</string>
+    <string name="setup_live_call_helper">Live calling depends on phone support and may need extra setup</string>
     <string name="setup_live_call_body">Lets the receiver answer here and use two-way call audio. Leave this off for ordinary SMS and incoming-call alerts—they work without root.</string>
     <string name="setup_contacts_label">Optional caller names</string>
     <string name="setup_contacts_helper">Uses contacts stored on this sender phone</string>
@@ -106,7 +106,7 @@
     <string name="home_messages_empty_title">No conversations yet</string>
     <string name="home_messages_empty_body">Texts from the same number appear together here.</string>
     <string name="home_activity_heading">Activity log</string>
-    <string name="home_activity_body">Relay tests, connection changes, retries, queue delivery, and live-call diagnostics.</string>
+    <string name="home_activity_body">Connection and delivery updates from your paired phones.</string>
     <string name="home_activity_empty_title">No technical activity</string>
     <string name="home_activity_empty_body">Connection and delivery details will appear here when the relay runs.</string>
 
@@ -153,7 +153,7 @@
     <string name="home_live_checking_detail">Checking root access and the gateway helper.</string>
     <string name="home_live_root_detail">Allow root access for NextNotif, then restart this pairing.</string>
     <string name="home_live_helper_detail">Install the NextNotif gateway helper on the sender, then restart this pairing.</string>
-    <string name="home_live_probe_detail">Restart this pairing. If this remains unavailable, run Gateway diagnostics.</string>
+    <string name="home_live_probe_detail">Restart this pairing. If live calls remain unavailable, check the phone setup.</string>
 
     <string name="menu_add_pairing">Add pairing</string>
     <string name="menu_battery">Battery exemption</string>
@@ -321,6 +321,14 @@
     <string name="sms_sim_last_reported">Last reported by the sender. Refresh after changing SIMs.</string>
     <string name="sms_sim_current_default">Reported default: SIM %1$s</string>
     <string name="sms_sim_refresh">Refresh SIMs</string>
+    <string name="diag_compatibility_title">Hardware compatibility scan</string>
+    <string name="diag_compatibility_body">Inventory audio devices, check the gateway helper, and test the call audio sources. An idle phone cannot prove cellular audio access; run a controlled call test when needed.</string>
+    <string name="diag_compatibility_run">Run compatibility scan</string>
+    <string name="diag_compatibility_running">Scanning audio routes…</string>
+    <string name="diag_compatibility_ready">Call paths detected</string>
+    <string name="diag_compatibility_inconclusive">Compatibility needs validation</string>
+    <string name="diag_gateway_helper">Gateway capability</string>
+    <string name="diag_audio_inventory">Audio devices found: %1$d</string>
     <string name="outgoing_call_title">New call</string>
     <string name="outgoing_call_action">Call through sender</string>
     <string name="outgoing_call_starting">Starting call…</string>

@@ -52,6 +52,7 @@ class RelayForegroundService : Service() {
         const val ACTION_BEGIN_OUTGOING_CALL = "com.nextnotif.app.BEGIN_OUTGOING_CALL"
         const val ACTION_PLACE_OUTGOING_CALL = "com.nextnotif.app.PLACE_OUTGOING_CALL"
         private const val TAG = "RelayService"
+        private const val BATTERY_REFRESH_MS = 30 * 60_000L
         private val RECONNECT_DELAYS_MS = longArrayOf(2_000L, 5_000L, 10_000L, 30_000L, 60_000L, 120_000L)
         @Volatile private var serviceRunning = false
     }
@@ -70,6 +71,7 @@ class RelayForegroundService : Service() {
     // Per-pairing uplinks for the SENDER role (one-shot POST path). Also keyed
     // by code; null when the pairing has no active sender role.
     private val uplinks = mutableMapOf<String, SenderUplink?>()
+    private val lastBatteryReports = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
     // Per-pairing Firebase relays.
     private val firebaseRelays = mutableMapOf<String, FirebaseRelay?>()
     // Per-pairing reconnect jobs — cancelling one does not affect the others.
@@ -329,6 +331,7 @@ class RelayForegroundService : Service() {
         reconnectAttempts.remove(code)
         sockets.remove(code)?.close()
         uplinks.remove(code)
+        lastBatteryReports.remove(code)
         stopFirebaseRelay(code)
         FcmOnDemand.cancel(this, code)
         GatewayCapabilityFeedback.clear(code)
@@ -735,11 +738,10 @@ class RelayForegroundService : Service() {
         for (p in SessionStore.load(this@RelayForegroundService).pairings) {
             if (!p.enabled) continue
             if (p.isFirebase) continue
-            if (p.role == Role.SENDER) sockets[p.code]?.sendBatteryStatus()
             val http = p.server.replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
             withContext(Dispatchers.IO) {
                 runCatching {
-                    if (p.role == Role.SENDER) postBatteryStatus(p)
+                    if (p.role == Role.SENDER) reportBatteryStatus(p)
                     val conn = URL("$http/pair/${p.code}/status").openConnection() as HttpURLConnection
                     conn.requestMethod = "GET"
                     conn.connectTimeout = 3000
@@ -761,10 +763,18 @@ class RelayForegroundService : Service() {
         }
     }
 
-    private fun postBatteryStatus(pairing: PairingInfo) {
+    private fun reportBatteryStatus(pairing: PairingInfo) {
         val battery = (getSystemService(Context.BATTERY_SERVICE) as? android.os.BatteryManager)
             ?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: return
-        if (battery !in 0..100 || pairing.deviceToken == null) return
+        if (battery !in 0..100) return
+        val now = SystemClock.elapsedRealtime()
+        val previous = lastBatteryReports[pairing.code]
+        if (previous != null && previous.first == battery && now - previous.second < BATTERY_REFRESH_MS) return
+        if (sockets[pairing.code]?.sendBatteryStatus() == true) {
+            lastBatteryReports[pairing.code] = battery to now
+            return
+        }
+        if (pairing.deviceToken == null) return
         val http = pairing.server.replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
         val conn = URL("$http/battery-status").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
@@ -777,6 +787,7 @@ class RelayForegroundService : Service() {
         conn.setRequestProperty("X-NextNotif-Token", pairing.deviceToken)
         conn.outputStream.use { it.write(JSONObject().put("battery_percent", battery).toString().toByteArray()) }
         conn.inputStream.close()
+        lastBatteryReports[pairing.code] = battery to now
     }
 
     private fun notifyLowSenderBattery(pairing: PairingInfo, battery: Int?) {

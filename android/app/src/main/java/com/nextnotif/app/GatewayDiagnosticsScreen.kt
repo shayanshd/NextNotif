@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import android.telephony.TelephonyManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -67,6 +68,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.io.File
 
 private enum class DiagnosticCallState { IDLE, RINGING, ACTIVE, UNKNOWN }
 
@@ -89,6 +91,8 @@ fun GatewayDiagnosticsScreen(onBack: () -> Unit) {
     var reportTimestamp by remember { mutableStateOf<Long?>(null) }
     var copied by remember { mutableStateOf(false) }
     var controlledProgress by remember { mutableStateOf<ControlledProbeProgress?>(null) }
+    var compatibilityReport by remember { mutableStateOf<HardwareCompatibilityReport?>(null) }
+    var scanning by remember { mutableStateOf(false) }
 
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         micGranted = granted
@@ -109,7 +113,7 @@ fun GatewayDiagnosticsScreen(onBack: () -> Unit) {
 
     val answerGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ANSWER_PHONE_CALLS) ==
         PackageManager.PERMISSION_GRANTED
-    val busy = runningSource != null
+    val busy = runningSource != null || scanning
 
     Scaffold(
         topBar = {
@@ -192,6 +196,71 @@ fun GatewayDiagnosticsScreen(onBack: () -> Unit) {
             }
 
             item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            stringResource(R.string.diag_compatibility_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        Text(
+                            stringResource(R.string.diag_compatibility_body),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    scanning = true
+                                    runningSource = null
+                                    compatibilityReport = null
+                                    val report = HardwareCompatibilityScanner.scan(context) { progress ->
+                                        runningSource = progress
+                                    }
+                                    compatibilityReport = report
+                                    runningSource = null
+                                    scanning = false
+                                    results = report.sources
+                                    reportCallState = callState
+                                    reportTimestamp = System.currentTimeMillis()
+                                    publishDiagnosticReport(
+                                        context,
+                                        buildGatewayReport(
+                                            results = report.sources,
+                                            callState = callState,
+                                            timestamp = reportTimestamp ?: System.currentTimeMillis(),
+                                            micGranted = micGranted,
+                                            answerGranted = answerGranted,
+                                            compatibility = report,
+                                        ),
+                                    )
+                                }
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                if (scanning) stringResource(R.string.diag_compatibility_running)
+                                else stringResource(R.string.diag_compatibility_run),
+                            )
+                        }
+                    }
+                }
+            }
+
+            compatibilityReport?.let { report ->
+                item { CompatibilitySummary(report) }
+            }
+
+            item {
                 HorizontalDivider()
                 Spacer(Modifier.height(16.dp))
                 DiagnosticSectionTitle(stringResource(R.string.diag_permissions))
@@ -242,9 +311,19 @@ fun GatewayDiagnosticsScreen(onBack: () -> Unit) {
                                     results = emptyList()
                                     controlledProgress = null
                                     val completed = GatewayAudioProbe.run { runningSource = it }
-                                    results = completed
+                        results = completed
                                     reportCallState = stateAtStart
                                     reportTimestamp = System.currentTimeMillis()
+                                    publishDiagnosticReport(
+                                        context,
+                                        buildGatewayReport(
+                                            results = completed,
+                                            callState = stateAtStart,
+                                            timestamp = reportTimestamp ?: System.currentTimeMillis(),
+                                            micGranted = micGranted,
+                                            answerGranted = answerGranted,
+                                        ),
+                                    )
                                     runningSource = null
                                 }
                             },
@@ -270,9 +349,19 @@ fun GatewayDiagnosticsScreen(onBack: () -> Unit) {
                                     val completed = GatewayAudioProbe.runControlledMic { progress ->
                                         scope.launch { controlledProgress = progress }
                                     }
-                                    results = listOf(completed)
+                        results = listOf(completed)
                                     reportCallState = stateAtStart
                                     reportTimestamp = System.currentTimeMillis()
+                                    publishDiagnosticReport(
+                                        context,
+                                        buildGatewayReport(
+                                            results = listOf(completed),
+                                            callState = stateAtStart,
+                                            timestamp = reportTimestamp ?: System.currentTimeMillis(),
+                                            micGranted = micGranted,
+                                            answerGranted = answerGranted,
+                                        ),
+                                    )
                                     controlledProgress = null
                                     runningSource = null
                                 }
@@ -329,6 +418,7 @@ fun GatewayDiagnosticsScreen(onBack: () -> Unit) {
                         timestamp = reportTimestamp ?: System.currentTimeMillis(),
                         micGranted = micGranted,
                         answerGranted = answerGranted,
+                        compatibility = compatibilityReport,
                     )
                     FilledTonalButton(
                         onClick = {
@@ -359,6 +449,96 @@ fun GatewayDiagnosticsScreen(onBack: () -> Unit) {
 @Composable
 private fun DiagnosticSectionTitle(text: String) {
     Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+}
+
+@Composable
+private fun CompatibilitySummary(report: HardwareCompatibilityReport) {
+    val positive = report.liveCallVerdict == LiveCallVerdict.READY_TO_VALIDATE
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (positive) MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(
+                    if (positive) Icons.Default.Check else Icons.Default.Info,
+                    contentDescription = null,
+                    tint = if (positive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    stringResource(
+                        if (positive) R.string.diag_compatibility_ready
+                        else R.string.diag_compatibility_inconclusive,
+                    ),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Text(
+                report.liveCallVerdict.userMessage(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Profile: ${report.profile.displayName} · ABI: ${report.profile.abi.label}",
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Text(
+                report.profile.helperAsset?.let { "Helper package: $it" }
+                    ?: if (report.profile.abi == GatewayCpuAbi.ARM64) {
+                        "ARM64 detected; route-specific helper still needs validation for this model."
+                    } else {
+                        "No compatible ARM64 helper package is bundled for this hardware."
+                    },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Board: ${report.platform.board} · device: ${report.platform.device} · API ${report.platform.api}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Monospace,
+            )
+            Text(
+                "ALSA: ${if (report.platform.alsaPcm.isBlank()) "no /proc/asound/pcm access" else "${report.platform.alsaPcm.lines().size} PCM lines"} · policy files: ${report.platform.policyFiles.size}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "Helper install: ${report.helperInstallation.status.name.lowercase().replace('_', ' ')}" +
+                    (report.helperInstallation.detail?.let { " · $it" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (report.profile.capturePcm != null || report.profile.playbackPcm != null) {
+                Text(
+                    "Voice PCM: capture ${report.profile.capturePcm ?: "?"} · playback ${report.profile.playbackPcm ?: "?"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            CapabilityRow(
+                label = stringResource(R.string.diag_gateway_helper),
+                value = report.capability.name,
+                positive = report.capability == GatewayCapability.AVAILABLE,
+            )
+            Text(
+                stringResource(R.string.diag_audio_inventory, report.audioDevices.size),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            report.audioDevices.take(8).forEach { device ->
+                Text(
+                    "${device.name} · ${device.summary()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -511,6 +691,7 @@ private fun buildGatewayReport(
     timestamp: Long,
     micGranted: Boolean,
     answerGranted: Boolean,
+    compatibility: HardwareCompatibilityReport? = null,
 ): String = buildString {
     appendLine("NextNotif gateway diagnostics")
     appendLine("Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(Date(timestamp))}")
@@ -518,6 +699,30 @@ private fun buildGatewayReport(
     appendLine("Build: Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT}, patch ${Build.VERSION.SECURITY_PATCH}")
     appendLine("Call state at start: ${callState.name}")
     appendLine("Permissions: RECORD_AUDIO=$micGranted, ANSWER_PHONE_CALLS=$answerGranted")
+    compatibility?.let { scan ->
+        appendLine("Profile: ${scan.profile.id.name}")
+        appendLine("Platform: ${scan.platform.manufacturer} ${scan.platform.model}")
+        appendLine("Device identifiers: device=${scan.platform.device}, board=${scan.platform.board}")
+        appendLine("Android: ${scan.platform.release}, API ${scan.platform.api}")
+        appendLine("ABIs: ${scan.platform.abis.joinToString(", ")}")
+        appendLine("Kernel: ${scan.platform.kernel}")
+        appendLine("ALSA cards:")
+        appendLine(scan.platform.alsaCards.ifBlank { "unavailable" })
+        appendLine("ALSA PCM:")
+        appendLine(scan.platform.alsaPcm.ifBlank { "unavailable" })
+        appendLine("Audio policy files: ${scan.platform.policyFiles.joinToString(", ").ifBlank { "none visible" }}")
+        appendLine("ABI: ${scan.profile.abi.label}")
+        appendLine("Helper package: ${scan.profile.helperAsset ?: "none"}")
+        appendLine("Helper install: ${scan.helperInstallation.status.name}")
+        scan.helperInstallation.target?.let { appendLine("Helper target: $it") }
+        appendLine("Voice PCM: capture=${scan.profile.capturePcm ?: "none"}, playback=${scan.profile.playbackPcm ?: "none"}")
+        appendLine("Gateway capability: ${scan.capability.name}")
+        appendLine("Live-call verdict: ${scan.liveCallVerdict.name}")
+        appendLine("Audio devices: ${scan.audioDevices.size}")
+        scan.audioDevices.forEach { device ->
+            appendLine("Device route: ${device.name} (${device.summary()})")
+        }
+    }
     results.forEach { result ->
         val measurements = result.summary?.let {
             ", %.1f dBFS, %.1f%% non-zero, %d samples".format(
@@ -545,4 +750,12 @@ private fun buildGatewayReport(
         }
     }
     append("Audio was measured in memory and discarded. Signal does not by itself prove caller-audio access.")
+}
+
+private fun publishDiagnosticReport(context: android.content.Context, report: String) {
+    runCatching {
+        val directory = context.getExternalFilesDir("diagnostics") ?: return@runCatching
+        File(directory, "latest.txt").writeText(report)
+    }.onFailure { Log.w("NextNotifDiagnostics", "Could not write latest.txt: ${it.message}") }
+    report.lineSequence().forEach { line -> Log.i("NextNotifDiagnostics", line) }
 }
