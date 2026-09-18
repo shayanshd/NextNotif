@@ -70,7 +70,11 @@ class RelaySocket(
         // A sinkhole stalls TLS; a real edge answers in well under 5 s, so a
         // short connect budget makes bad addresses fail over fast.
         .connectTimeout(5, TimeUnit.SECONDS)
-        .dns(DohFirstDns(context.applicationContext))
+        // A temporary FCM call socket has only the relay's short auth window
+        // to complete. DoH probing can spend several seconds on old/mobile
+        // networks, so use the platform resolver for this latency-sensitive
+        // connection. Persistent sockets retain the hardened resolver.
+        .dns(if (fcmOnDemand) Dns.SYSTEM else DohFirstDns(context.applicationContext))
         .build()
 
     private var ws: WebSocket? = null
