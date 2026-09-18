@@ -68,18 +68,25 @@ internal object OutgoingCallRelay {
     }
 
     suspend fun submit(context: Context, pairing: PairingInfo, number: String, subscriptionId: Int?): String = withContext(Dispatchers.IO) {
-        require(pairing.role == Role.RECEIVER && pairing.enabled && !pairing.isFirebase && pairing.deviceToken != null)
+        // SIM discovery may register a fresh FCM device token immediately
+        // before this call. Do not keep using the stale Compose snapshot that
+        // was passed into the screen; reload the pairing after registration.
+        val current = SessionStore.load(context).pairings.firstOrNull {
+            it.code == pairing.code && it.server == pairing.server &&
+                it.role == Role.RECEIVER && it.enabled && !it.isFirebase
+        } ?: error("This pairing is no longer available")
+        require(current.deviceToken != null) { "Pairing is still registering notifications" }
         val id = UUID.randomUUID().toString()
         val command = JSONObject().put("id", id).put("to", number)
             .put("subscription_id", subscriptionId ?: JSONObject.NULL).put("created_at", System.currentTimeMillis())
         OutgoingCallRequestStore.set(context, pairing.code, id)
         try {
-            post(pairing, "call-submit", command)
+            post(current, "call-submit", command)
         } catch (failure: Throwable) {
             if (failure.message?.contains("HTTP 409") == true &&
                 RelayCallUiPolicy.finished(AppState.callRelay.value.phase)) {
-                runCatching { post(pairing, "call-cancel", JSONObject().put("reason", "Receiver started a new call")) }
-                runCatching { post(pairing, "call-submit", command) }.getOrElse {
+                runCatching { post(current, "call-cancel", JSONObject().put("reason", "Receiver started a new call")) }
+                runCatching { post(current, "call-submit", command) }.getOrElse {
                     OutgoingCallRequestStore.clearIfCurrent(context, pairing.code, id)
                     throw it
                 }
