@@ -1,12 +1,15 @@
 package com.nextnotif.app
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Build
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
@@ -22,6 +25,8 @@ internal fun callNotificationAction(
     state == "OFFHOOK" -> CallNotificationAction.HANG_UP
     else -> null
 }
+
+internal fun shouldRingCallNotification(state: String): Boolean = state == "RINGING"
 
 object IncomingNotifier {
 
@@ -62,6 +67,11 @@ object IncomingNotifier {
             builder.setCategory(NotificationCompat.CATEGORY_CALL)
                 .setOngoing(true)
                 .setTimeoutAfter(90_000L)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setVibrate(longArrayOf(0L, 700L, 500L, 700L))
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                builder.setSound(Settings.System.DEFAULT_RINGTONE_URI, AudioManager.STREAM_RING)
+            }
             if (Build.VERSION.SDK_INT < 34 || nm.canUseFullScreenIntent()) {
                 builder.setFullScreenIntent(pi, true)
             }
@@ -84,7 +94,15 @@ object IncomingNotifier {
             }
             builder.addAction(0, actionLabel, actionPi)
         }
-        nm.notify(id, builder.build())
+        if (!ringing) {
+            // Replacing an insistent call notification stops its ringtone as
+            // soon as the sender reports OFFHOOK or IDLE.
+            nm.cancel(id)
+        }
+        val notification = builder.build().apply {
+            if (ringing) flags = flags or Notification.FLAG_INSISTENT
+        }
+        nm.notify(id, notification)
     }
 
     fun notifySms(ctx: Context, from: String, body: String, name: String? = null) {
@@ -156,7 +174,9 @@ object IncomingNotifier {
             callScreenIntent = if (actionKind != null) RelayCallActivity.createIntent(
                 ctx, requireNotNull(code), number, name, answer = false, offeredAt = offeredAt,
             ) else null,
-            ringing = actionKind == CallNotificationAction.ANSWER,
+            // Ring for every forwarded incoming call. Whether this device can
+            // answer the call is a separate capability represented by actionKind.
+            ringing = shouldRingCallNotification(state),
         )
     }
 }

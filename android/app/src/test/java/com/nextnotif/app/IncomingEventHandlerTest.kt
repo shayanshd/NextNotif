@@ -49,6 +49,13 @@ class IncomingEventHandlerTest {
     }
 
     @Test
+    fun `all incoming calls ring even when live answering is unavailable`() {
+        assertTrue(shouldRingCallNotification("RINGING"))
+        assertFalse(shouldRingCallNotification("OFFHOOK"))
+        assertFalse(shouldRingCallNotification("IDLE"))
+    }
+
+    @Test
     fun `hang up action is gated and informational states have no action`() {
         assertNull(callNotificationAction("OFFHOOK", "123456", liveCallAvailable = false))
         assertEquals(
