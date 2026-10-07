@@ -64,4 +64,14 @@ class IncomingEventHandlerTest {
         )
         assertNull(callNotificationAction("IDLE", "123456", liveCallAvailable = true))
     }
+
+    @Test
+    fun `separate messages stack while call transitions replace one notification`() {
+        val first = forwardedNotificationId(ForwardedNotificationKind.SMS, "event-1")
+        val second = forwardedNotificationId(ForwardedNotificationKind.SMS, "event-2")
+        val call = forwardedNotificationId(ForwardedNotificationKind.CALL, "123456")
+        assertTrue(first != second)
+        assertTrue(first != call)
+        assertEquals(call, forwardedNotificationId(ForwardedNotificationKind.CALL, "123456"))
+    }
 }

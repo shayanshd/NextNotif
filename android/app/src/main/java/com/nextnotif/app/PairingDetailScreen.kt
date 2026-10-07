@@ -210,10 +210,7 @@ fun PairingDetailScreen(
                                         if (pairing.role == Role.SENDER) R.string.home_role_sender_short
                                         else R.string.home_role_receiver_short,
                                     ) + " · " + when {
-                                        pairing.isFirebase -> stringResource(
-                                            if (pairing.fbConfig.isNullOrBlank()) R.string.home_transport_firebase
-                                            else R.string.home_transport_firebase_own,
-                                        )
+                                        pairing.isFirebase -> stringResource(R.string.home_transport_firebase)
                                         pairing.isFcmOnDemand -> stringResource(R.string.home_transport_fcm)
                                         else -> serverHost(pairing.server)
                                     },
@@ -271,7 +268,7 @@ fun PairingDetailScreen(
                 }
             }
 
-            if (pairing.role == Role.SENDER && pairing.isFcmOnDemand) {
+            if (pairing.role == Role.SENDER && !pairing.isFirebase) {
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -426,10 +423,7 @@ fun PairingDetailScreen(
                         DetailInfoRow(
                             label = stringResource(R.string.detail_connection),
                             value = when {
-                                pairing.isFirebase -> stringResource(
-                                    if (pairing.fbConfig.isNullOrBlank()) R.string.home_transport_firebase
-                                    else R.string.home_transport_firebase_own
-                                )
+                                pairing.isFirebase -> stringResource(R.string.home_transport_firebase)
                                 pairing.isFcmOnDemand -> stringResource(R.string.home_transport_fcm)
                                 else -> stringResource(R.string.setup_transport_ws)
                             },
@@ -438,7 +432,7 @@ fun PairingDetailScreen(
                         DetailInfoRow(
                             label = stringResource(R.string.detail_server),
                             value = if (pairing.isFirebase) {
-                                "Firebase Realtime Database"
+                                stringResource(R.string.home_transport_firebase)
                             } else {
                                 pairing.server
                             },

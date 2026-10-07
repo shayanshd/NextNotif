@@ -13,6 +13,7 @@ internal data class SenderUplinkResult(
     val accepted: Boolean,
     val deliveredDirectly: Boolean? = null,
     val queuedCount: Int? = null,
+    val overflowDropped: Int = 0,
     val failure: String? = null,
 )
 
@@ -33,6 +34,7 @@ class SenderUplink(
     server: String,
     private val code: String,
     private val deviceToken: String? = null,
+    private val deviceId: String? = null,
 ) {
     private val base: String = when {
         server.startsWith("wss://") -> "https://" + server.substring("wss://".length)
@@ -63,6 +65,10 @@ class SenderUplink(
         val req = Request.Builder()
             .url("$base/send")
             .header("X-NextNotif-Code", code)
+            .apply {
+                deviceId?.let { header("X-NextNotif-Device-Id", it) }
+                deviceToken?.let { header("X-NextNotif-Token", it) }
+            }
             .post(payload.toString().toRequestBody(JSON_MEDIA))
             .build()
         return try {
@@ -76,7 +82,7 @@ class SenderUplink(
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "send $type failed: ${t::class.simpleName}: ${t.message}", t)
+            Log.w(TAG, "send $type failed: ${t::class.simpleName}")
             SenderUplinkResult(false, failure = t.message ?: t::class.simpleName ?: "Network error")
         }
     }
@@ -91,6 +97,7 @@ class SenderUplink(
                 accepted = true,
                 deliveredDirectly = json?.takeIf { it.has("delivered") }?.optBoolean("delivered"),
                 queuedCount = json?.takeIf { it.has("queued") }?.optInt("queued")?.coerceAtLeast(0),
+                overflowDropped = json?.optInt("overflow_dropped")?.coerceAtLeast(0) ?: 0,
             )
         }
     }

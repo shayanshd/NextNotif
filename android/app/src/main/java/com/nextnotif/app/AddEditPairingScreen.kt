@@ -20,7 +20,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -59,7 +58,6 @@ fun AddEditPairingScreen(
     busyLabel: String?,
     error: String?,
     onBack: () -> Unit,
-    onGenerateCode: (server: String, onResult: (code: String?, failure: String?) -> Unit) -> Unit,
     contactsPermissionGranted: Boolean,
     contactsPermissionDenied: Boolean,
     contactsPermissionNeedsSettings: Boolean,
@@ -71,33 +69,32 @@ fun AddEditPairingScreen(
         code: String,
         server: String,
         transport: String?,
-        fbConfig: String?,
         liveCallEnabled: Boolean,
+        setupMode: PairingSetupMode,
+        inviteSecret: String?,
     ) -> Unit,
 ) {
     val isEdit = editing != null
+    val secureEdit = editing?.deviceId != null
     var label by remember { mutableStateOf(editing?.label ?: "") }
     var role by remember { mutableStateOf<Role?>(editing?.role) }
     var code by remember { mutableStateOf(editing?.code ?: "") }
     var server by remember { mutableStateOf(editing?.server ?: Config.DEFAULT_SERVER) }
+    var setupMode by remember { mutableStateOf(PairingSetupMode.CREATE) }
+    var inviteText by remember { mutableStateOf("") }
     // New pairings default to on-demand FCM; editing preserves the existing
     // choice (legacy relay pairings persist transport=null, which means WS).
     var transport by remember { mutableStateOf(initialTransportFor(editing)) }
-    var fbConfig by remember { mutableStateOf(editing?.fbConfig ?: "") }
-    var ownProject by remember {
-        mutableStateOf(editing?.fbConfig?.isNotBlank() == true)
-    }
-    var generating by remember { mutableStateOf(false) }
     var liveCallEnabled by remember { mutableStateOf(editing?.liveCallEnabled ?: false) }
     var showContactsExplanation by remember { mutableStateOf(false) }
 
-    val isFirebase = transport == FirebaseRelay.TRANSPORT
     val isFcmOnDemand = transport == FcmOnDemand.TRANSPORT
-    val fbParsed = remember(fbConfig) { FirebaseConfig.parse(fbConfig) }
+    val parsedInvite = remember(inviteText) { SecureInviteText.parse(inviteText) }
     val ready = when {
-        role == null || code.length != 6 -> false
-        isFirebase -> !ownProject || fbParsed != null
-        else -> true
+        editing?.isFirebase == true || role == null -> false
+        isEdit -> code.length == 6
+        setupMode == PairingSetupMode.CREATE -> SecureInviteText.validServer(server.trim().trimEnd('/'))
+        else -> parsedInvite != null && role == parsedInvite.role
     }
 
     Scaffold(
@@ -145,7 +142,7 @@ fun AddEditPairingScreen(
                         icon = Icons.Filled.Send,
                         title = stringResource(R.string.setup_sender),
                         description = stringResource(R.string.setup_sender_desc),
-                        onClick = { role = Role.SENDER },
+                        onClick = { if (!secureEdit) role = Role.SENDER },
                         modifier = Modifier.weight(1f),
                     )
                     RoleCard(
@@ -154,12 +151,43 @@ fun AddEditPairingScreen(
                         title = stringResource(R.string.setup_receiver),
                         description = stringResource(R.string.setup_receiver_desc),
                         onClick = {
-                            role = Role.RECEIVER
-                            liveCallEnabled = false
-                            showContactsExplanation = false
+                            if (!secureEdit) {
+                                role = Role.RECEIVER
+                                liveCallEnabled = false
+                                showContactsExplanation = false
+                            }
                         },
                         modifier = Modifier.weight(1f),
                     )
+                }
+            }
+
+            if (secureEdit) {
+                Text(
+                    stringResource(R.string.setup_secure_identity_locked),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (!isEdit) {
+                FieldCard(label = stringResource(R.string.setup_invite_mode_label)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TransportOption(
+                            selected = setupMode == PairingSetupMode.CREATE,
+                            title = stringResource(R.string.setup_invite_create),
+                            description = stringResource(R.string.setup_invite_create_desc),
+                            onClick = { setupMode = PairingSetupMode.CREATE },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        TransportOption(
+                            selected = setupMode == PairingSetupMode.JOIN,
+                            title = stringResource(R.string.setup_invite_join),
+                            description = stringResource(R.string.setup_invite_join_desc),
+                            onClick = { setupMode = PairingSetupMode.JOIN },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
 
@@ -233,7 +261,7 @@ fun AddEditPairingScreen(
                     }
                 }
 
-                FieldCard(
+                if (Config.LIVE_CALL_BETA_ENABLED) FieldCard(
                     label = stringResource(R.string.setup_live_call_label),
                     helper = stringResource(R.string.setup_live_call_helper),
                 ) {
@@ -282,7 +310,7 @@ fun AddEditPairingScreen(
                         description = stringResource(R.string.setup_transport_fcm_desc),
                         onClick = { transport = FcmOnDemand.TRANSPORT },
                         modifier = Modifier.fillMaxWidth(),
-                        badge = stringResource(R.string.setup_fb_recommended),
+                        badge = stringResource(R.string.setup_recommended),
                     )
                     TransportOption(
                         selected = transport == TRANSPORT_WS,
@@ -291,28 +319,17 @@ fun AddEditPairingScreen(
                         onClick = { transport = TRANSPORT_WS },
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    TransportOption(
-                        selected = isFirebase,
-                        title = stringResource(R.string.setup_transport_fb),
-                        description = stringResource(R.string.setup_transport_fb_desc),
-                        onClick = { transport = FirebaseRelay.TRANSPORT },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
                 }
             }
 
-            FieldCard(
-                label = stringResource(R.string.setup_pairing_label),
-                helper = if (isFirebase) stringResource(R.string.setup_code_helper_fb) else stringResource(R.string.setup_code_helper),
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (isEdit) {
+                FieldCard(label = stringResource(R.string.setup_pairing_label)) {
                     OutlinedTextField(
                         value = code,
-                        onValueChange = { newValue ->
-                            code = newValue.filter(Char::isDigit).take(6)
-                        },
+                        onValueChange = {},
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text(stringResource(R.string.setup_code_label)) },
+                        readOnly = true,
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         textStyle = MaterialTheme.typography.bodyLarge.copy(
@@ -322,83 +339,53 @@ fun AddEditPairingScreen(
                             textAlign = TextAlign.Center,
                         ),
                     )
-                    if (!isFirebase) {
-                        OutlinedButton(
-                            onClick = {
-                                generating = true
-                                onGenerateCode(server) { generated, failure ->
-                                    generating = false
-                                    if (generated != null) {
-                                        code = generated
-                                    }
-                                }
-                            },
-                            enabled = !busy && !generating,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Refresh,
-                                contentDescription = null,
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(stringResource(R.string.setup_generate))
-                        }
+                }
+            }
+
+            if (!isEdit && setupMode == PairingSetupMode.JOIN) {
+                FieldCard(label = stringResource(R.string.setup_invite_label),
+                    helper = stringResource(R.string.setup_invite_helper)) {
+                    OutlinedTextField(
+                        value = inviteText,
+                        onValueChange = { value ->
+                            inviteText = value.take(512)
+                            SecureInviteText.parse(inviteText)?.let { role = it.role; server = it.server }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text(stringResource(R.string.setup_invite_label)) },
+                        minLines = 2,
+                        maxLines = 4,
+                    )
+                    if (inviteText.isNotBlank() && parsedInvite == null) {
+                        Text(stringResource(R.string.setup_invite_invalid),
+                            color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
 
-            if (!isFirebase) {
-                FieldCard(
+            if (isEdit || setupMode == PairingSetupMode.CREATE) FieldCard(
                     label = stringResource(R.string.setup_server_label),
                     helper = stringResource(R.string.setup_server_helper),
                 ) {
                     OutlinedTextField(
                         value = server,
                         onValueChange = { server = it },
+                        readOnly = secureEdit,
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text(stringResource(R.string.setup_server_label)) },
                         singleLine = true,
                     )
-                }
-            } else {
-                FieldCard(
-                    label = stringResource(
-                        if (ownProject) R.string.setup_fb_config_label else R.string.setup_fb_relay_label
-                    ),
-                    helper = stringResource(
-                        if (ownProject) R.string.setup_fb_config_helper else R.string.setup_fb_builtin_note
-                    ),
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (ownProject) {
-                            OutlinedTextField(
-                                value = fbConfig,
-                                onValueChange = { fbConfig = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                label = { Text(stringResource(R.string.setup_fb_config_label)) },
-                                minLines = 4,
-                                maxLines = 12,
-                                textStyle = MaterialTheme.typography.bodySmall.copy(
-                                    fontFamily = FontFamily.Monospace,
-                                ),
-                            )
-                            if (fbConfig.isNotBlank() && fbParsed == null) {
-                                Text(
-                                    text = stringResource(R.string.setup_fb_config_invalid),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                )
-                            }
-                        }
-                        TextButton(onClick = { ownProject = !ownProject }) {
-                            Text(
-                                stringResource(
-                                    if (ownProject) R.string.setup_fb_use_builtin else R.string.setup_fb_use_own
-                                )
-                            )
-                        }
-                    }
-                }
+            } else if (parsedInvite != null) {
+                Text(stringResource(R.string.setup_invite_server, parsedInvite.server),
+                    style = MaterialTheme.typography.bodySmall)
+            }
+
+            if (editing?.isFirebase == true) {
+                Text(
+                    text = stringResource(R.string.setup_legacy_firebase_migration),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
 
             if (error != null) {
@@ -428,27 +415,25 @@ fun AddEditPairingScreen(
             }
 
             PrimaryCta(
-                text = stringResource(if (isEdit) R.string.edit_cta else R.string.add_cta),
+                text = stringResource(when {
+                    isEdit -> R.string.edit_cta
+                    setupMode == PairingSetupMode.CREATE -> R.string.setup_invite_create_action
+                    else -> R.string.setup_invite_join_action
+                }),
                 enabled = ready,
-                busy = busy || generating,
-                busyLabel = busyLabel
-                    ?: if (generating) stringResource(R.string.setup_generating)
-                    else stringResource(R.string.setup_connecting),
+                busy = busy,
+                busyLabel = busyLabel ?: stringResource(R.string.setup_connecting),
             ) {
                 val selectedRole = role ?: return@PrimaryCta
-                val useOwn = isFirebase && ownProject
                 onSubmit(
                     label.trim().takeIf { it.isNotEmpty() },
                     selectedRole,
-                    code,
-                    server,
-                    when {
-                        isFirebase -> FirebaseRelay.TRANSPORT
-                        isFcmOnDemand -> FcmOnDemand.TRANSPORT
-                        else -> null
-                    },
-                    if (useOwn && fbConfig.isNotBlank()) fbConfig.trim() else null,
+                    if (isEdit) code else parsedInvite?.code.orEmpty(),
+                    if (!isEdit && setupMode == PairingSetupMode.JOIN) parsedInvite?.server ?: server else server,
+                    if (isFcmOnDemand) FcmOnDemand.TRANSPORT else TRANSPORT_WS,
                     liveCallEnabledFor(selectedRole, liveCallEnabled),
+                    if (isEdit) PairingSetupMode.EDIT else setupMode,
+                    if (!isEdit && setupMode == PairingSetupMode.JOIN) parsedInvite?.secret else null,
                 )
             }
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { submitSms, updateSms, expireSms, SMS_TTL_MS, simOptions } from './src/sms-mailbox.mjs';
+import { submitSms, updateSms, expireSms, SMS_TTL_MS, SMS_RETENTION_MS, simOptions } from './src/sms-mailbox.mjs';
 const now = 10000000;
 const command = {id: '00000000-0000-4000-8000-000000000001', to: '+15551234567', body: 'Hello', created_at: now};
 let result = submitSms([], command, now);
@@ -16,6 +16,9 @@ updateSms(records, {id: command.id, status: 'sending'});
 assert.equal(records[0].status, 'sent');
 assert.equal(updateSms(records, {id: command.id, status: 'invalid'}), false);
 assert.equal(expireSms(submitSms([], command, now).records, now + SMS_TTL_MS)[0].status, 'expired');
+assert.equal(expireSms(records, now + SMS_RETENTION_MS - 1).length, 1);
+assert.deepEqual(expireSms(records, now + SMS_RETENTION_MS), []);
+assert.deepEqual(expireSms([{...records[0], created_at: 'invalid'}], now), []);
 console.log('SMS mailbox validation, idempotency, expiry and state transitions passed');
 
 const selected = submitSms([], {...command, subscription_id: 12}, now);

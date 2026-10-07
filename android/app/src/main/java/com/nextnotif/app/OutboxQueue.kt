@@ -112,18 +112,18 @@ object OutboxQueue {
     }
 
     fun enqueue(ctx: Context, code: String, type: String, data: JSONObject) {
-        enqueue(ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE), code, type, data)
+        enqueue(ProtectedPreferences.from(ctx, PREFS_NAME), code, type, data)
     }
 
     internal fun peek(ctx: Context, code: String): Entry? {
-        return peek(ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE), code)
+        return peek(ProtectedPreferences.from(ctx, PREFS_NAME), code)
     }
 
     internal fun acknowledge(ctx: Context, code: String, id: String): Boolean {
-        return acknowledge(ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE), code, id)
+        return acknowledge(ProtectedPreferences.from(ctx, PREFS_NAME), code, id)
     }
 
     fun drain(ctx: Context, code: String): List<Pair<String, JSONObject>> {
-        return drain(ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE), code)
+        return drain(ProtectedPreferences.from(ctx, PREFS_NAME), code)
     }
 }

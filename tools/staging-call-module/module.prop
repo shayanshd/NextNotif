@@ -1,0 +1,6 @@
+id=nextnotif_staging_call
+name=NextNotif Staging Call Test
+version=0.1
+versionCode=1
+author=NextNotif
+description=Isolated staging call gateway; never replaces the original NextNotif module.

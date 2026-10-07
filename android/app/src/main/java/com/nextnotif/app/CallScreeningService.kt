@@ -24,7 +24,7 @@ class CallScreeningService : CallScreeningService() {
             ?: callDetails.callerDisplayName
             ?: null
         if (!number.isNullOrBlank()) {
-            Log.i("CallScreening", "screened incoming call from $number ($name)")
+            Log.i("CallScreening", "screened incoming call")
             CallContext.record(number, name)
         }
     }

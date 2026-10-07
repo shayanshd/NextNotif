@@ -1,10 +1,6 @@
 {
   "rules": {
-    "pairings": {
-      "$code": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      }
-    }
+    ".read": false,
+    ".write": false
   }
 }

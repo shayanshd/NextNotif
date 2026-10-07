@@ -756,6 +756,5 @@ private fun publishDiagnosticReport(context: android.content.Context, report: St
     runCatching {
         val directory = context.getExternalFilesDir("diagnostics") ?: return@runCatching
         File(directory, "latest.txt").writeText(report)
-    }.onFailure { Log.w("NextNotifDiagnostics", "Could not write latest.txt: ${it.message}") }
-    report.lineSequence().forEach { line -> Log.i("NextNotifDiagnostics", line) }
+    }.onFailure { Log.w("NextNotifDiagnostics", "Could not write latest.txt: ${it.javaClass.simpleName}") }
 }

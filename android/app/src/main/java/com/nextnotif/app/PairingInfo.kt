@@ -7,12 +7,15 @@ data class PairingInfo(
     val transport: String? = null,
     val fbConfig: String? = null,
     val secret: String? = null,
+    val deviceId: String? = null,
     val deviceToken: String? = null,
+    val ownsPairing: Boolean = false,
     val label: String? = null,
     val enabled: Boolean = true,
     val liveCallEnabled: Boolean = false,
 ) {
-    val isFirebase: Boolean get() = transport == FirebaseRelay.TRANSPORT
+    // Recognize saved pairings from older releases so they can be migrated.
+    val isFirebase: Boolean get() = transport == LEGACY_FIREBASE_TRANSPORT
     val isFcmOnDemand: Boolean get() = transport == FcmOnDemand.TRANSPORT
     val isWs: Boolean get() = !isFirebase && !isFcmOnDemand
 
@@ -20,8 +23,12 @@ data class PairingInfo(
     val displayName: String get() = label?.trim()?.takeIf { it.isNotEmpty() } ?: "Pairing $code"
 }
 
+const val LEGACY_FIREBASE_TRANSPORT = "firebase"
+
+enum class PairingSetupMode { CREATE, JOIN, EDIT }
+
 internal fun liveCallEnabledFor(role: Role, requested: Boolean): Boolean =
-    role == Role.SENDER && requested
+    Config.LIVE_CALL_BETA_ENABLED && role == Role.SENDER && requested
 
 /** Local preference edits never need remote reachability; identity edits still do. */
 internal fun canSavePairingPreferencesOffline(
@@ -39,8 +46,14 @@ internal fun retainedDeviceToken(
     existing ?: return null
     if (existing.code != code || existing.role != role) return null
     if (existing.server.trim().trimEnd('/') != server.trim().trimEnd('/')) return null
-    val firebase = transport == FirebaseRelay.TRANSPORT
+    val firebase = transport == LEGACY_FIREBASE_TRANSPORT
     if (existing.isFirebase != firebase) return null
     if (firebase && existing.fbConfig != fbConfig) return null
     return existing.deviceToken
 }
+
+internal fun retainedDeviceId(
+    existing: PairingInfo?, code: String, role: Role, server: String,
+    transport: String?, fbConfig: String?,
+): String? = if (retainedDeviceToken(existing, code, role, server, transport, fbConfig) != null)
+    existing?.deviceId else null

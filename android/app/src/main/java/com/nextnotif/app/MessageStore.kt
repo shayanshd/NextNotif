@@ -9,6 +9,8 @@ import org.json.JSONObject
 class MessageStore(
     private val prefs: SharedPreferences,
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
+    private val retentionMs: Long? = null,
+    private val now: () -> Long = System::currentTimeMillis,
 ) {
     init {
         require(maxEntries > 0) { "maxEntries must be positive" }
@@ -18,13 +20,17 @@ class MessageStore(
     fun load(): List<AppState.Entry> {
         val raw = prefs.getString(KEY_ENTRIES, null) ?: return emptyList()
         val array = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
-        return buildList {
+        val entries = buildList {
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
                 decode(item)?.let(::add)
                 if (size == maxEntries) break
             }
         }
+        val cutoff = retentionMs?.let { now() - it } ?: return entries
+        val retained = entries.filter { it.ts >= cutoff }
+        if (retained.size != entries.size) persist(retained)
+        return retained
     }
 
     /** Returns the current persisted history, newest first. */
@@ -135,9 +141,10 @@ class MessageStore(
         private const val KEY_ENTRIES = "entries"
         private const val KEY_SEEN = "seen_events"
         const val DEFAULT_MAX_ENTRIES = 200
+        private const val CONTENT_RETENTION_MS = 30L * 24 * 60 * 60 * 1000
 
         fun from(context: Context): MessageStore = MessageStore(
-            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ProtectedPreferences.from(context, PREFS), retentionMs = CONTENT_RETENTION_MS
         )
 
         fun isHumanCommunication(entry: AppState.Entry): Boolean = when (entry.tag) {

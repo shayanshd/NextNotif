@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { timingSafeEqual } from 'node:crypto';
 import { SecurePairingStore } from './src/secure-pairing-store.mjs';
 import { authorizeSecure, AuthorizationError } from './src/secure-pairing.mjs';
+import { JOIN_ATTEMPTS_PER_MINUTE, PairingRateLimitError } from './src/pairing-rate-limit.mjs';
 crypto.subtle.timingSafeEqual = (a, b) => timingSafeEqual(a, b);
 
 // Serialized, rollback-capable adapter; runtime tests must separately exercise
@@ -21,7 +22,8 @@ class Storage {
     await previous;
     const next = new Map(this.data);
     try {
-      const result = await action({ get: async key => next.get(key), put: async (key, value) => {
+      const result = await action({ get: async key => next.get(key), list: async () => new Map(next),
+        delete: async key => next.delete(key), put: async (key, value) => {
         if (this.failWrite) throw new Error('write failed');
         if (typeof key === 'object') for (const [k, v] of Object.entries(key)) next.set(k, v);
         else next.set(key, value);
@@ -46,6 +48,23 @@ test('competing invite consumers receive exactly one committed grant', async () 
   assert.equal(await authorizeSecure(record, grant.device_id, grant.device_token, 'receiver'), grant.device_id);
   await assert.rejects(restarted.join(created.invite.secret, 'receiver', 1002), AuthorizationError);
   assert.ok(!JSON.stringify([...storage.data]).includes(grant.device_token));
+});
+
+test('known pairing limits wrong invite attempts without consuming the valid invite', async () => {
+  const storage = new Storage();
+  const store = new SecurePairingStore(storage);
+  const created = await store.create('sender', 1000);
+  for (let i = 0; i < JOIN_ATTEMPTS_PER_MINUTE; i += 1)
+    await assert.rejects(store.join('wrong', 'receiver', 1001), AuthorizationError);
+  await assert.rejects(store.join(created.invite.secret, 'receiver', 1002), PairingRateLimitError);
+  const joined = await store.join(created.invite.secret, 'receiver', 1062);
+  assert.ok(joined.device.device_id);
+});
+
+test('unknown pairing joins create no persistent rate-limit state', async () => {
+  const storage = new Storage();
+  await assert.rejects(new SecurePairingStore(storage).join('wrong', 'receiver', 1001), AuthorizationError);
+  assert.equal(storage.data.size, 0);
 });
 
 test('creation atomically reserves the namespace without claiming legacy ownership', async () => {
@@ -86,4 +105,21 @@ test('sync failure releases no grant and corrupt stored records fail closed', as
     storage.data.set('secureRecord', raw);
     await assert.rejects(new SecurePairingStore(storage).read(), AuthorizationError);
   }
+});
+
+test('owner deletion removes queued content and rejects both former devices', async () => {
+  const storage = new Storage();
+  const store = new SecurePairingStore(storage);
+  const owner = await store.create('sender', 1000);
+  const peer = await store.join(owner.invite.secret, 'receiver', 1001);
+  storage.data.set('queue', JSON.stringify([{ type: 'sms', data: { body: 'private text' } }]));
+  storage.data.set('fcm', JSON.stringify({ receiver: 'old wake token' }));
+  await assert.rejects(store.delete(peer.device.device_id, peer.device.device_token), AuthorizationError);
+  assert.equal(await store.delete(owner.device.device_id, owner.device.device_token), true);
+  assert.deepEqual([...storage.data.keys()].sort(), ['deletionRecord', 'securityMode']);
+  assert.ok(!JSON.stringify([...storage.data]).includes('private text'));
+  assert.equal(await store.delete(owner.device.device_id, owner.device.device_token), false);
+  await assert.rejects(store.delete(peer.device.device_id, peer.device.device_token), AuthorizationError);
+  await assert.rejects(store.read(), AuthorizationError);
+  await assert.rejects(store.create('sender', 1002), AuthorizationError);
 });

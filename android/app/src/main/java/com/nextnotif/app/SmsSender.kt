@@ -1,7 +1,6 @@
 package com.nextnotif.app
 
 import android.Manifest
-import android.app.Activity
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -20,10 +19,12 @@ internal object SmsSender {
         check(context.getSharedPreferences("nextnotif_sms_preferences", Context.MODE_PRIVATE).edit().putBoolean("enabled", enabled).commit())
     }
     fun permitted(context: Context): Boolean = ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED
+    fun phoneStatePermitted(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
     fun simOptions(context: Context): JSONObject {
         val result = JSONObject().put("sims", JSONArray()).put("default_id", JSONObject.NULL)
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED)
+        if (!phoneStatePermitted(context))
             return result.put("state", "permission_required")
         return try {
             val active = context.getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList.orEmpty()
@@ -105,7 +106,7 @@ class SmsSentReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = intent.getStringExtra("id") ?: return
         val result = SmsOutbox.store(context).partResult(id, intent.getIntExtra("part", -1),
-            intent.getIntExtra("count", 0), resultCode == Activity.RESULT_OK) ?: return
+            intent.getIntExtra("count", 0), resultCode, intent.getIntExtra("errorCode", 0)) ?: return
         SmsOutbox.refresh(context)
         SmsRelay.enqueue(context, result.optString("code"))
     }

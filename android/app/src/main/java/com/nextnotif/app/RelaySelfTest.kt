@@ -5,7 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-/** User-initiated, non-call event that verifies the real HTTPS -> queue -> FCM path. */
+/** User-initiated, non-call event that verifies relay delivery to the receiver. */
 object RelaySelfTest {
     const val EVENT_TYPE = "relay_test"
     const val DEFAULT_MESSAGE = "Test received — this pairing can reach your phone."
@@ -17,7 +17,7 @@ object RelaySelfTest {
     }
 
     fun canSend(pairing: PairingInfo): Boolean =
-        pairing.enabled && pairing.role == Role.SENDER && pairing.isFcmOnDemand
+        pairing.enabled && pairing.role == Role.SENDER && !pairing.isFirebase
 
     fun payload(timestamp: Long): JSONObject = JSONObject().apply {
         put("message", DEFAULT_MESSAGE)
@@ -31,13 +31,14 @@ object RelaySelfTest {
             .ifBlank { DEFAULT_MESSAGE }
 
     suspend fun send(context: Context, pairing: PairingInfo): Result {
-        if (!canSend(pairing)) return Result.Failure("This test requires an enabled FCM sender pairing.")
+        if (!canSend(pairing)) return Result.Failure("This test requires an enabled sender pairing.")
         return withContext(Dispatchers.IO) {
             val response = SenderUplink(
                 context.applicationContext,
                 pairing.server,
                 pairing.code,
                 pairing.deviceToken,
+                pairing.deviceId,
             ).sendDetailed(EVENT_TYPE, payload(System.currentTimeMillis()))
             if (response.accepted) {
                 Result.Success(queuedForReceiver = response.deliveredDirectly == false)

@@ -27,12 +27,16 @@ internal fun conversationNumber(thread: TextConversation): String? = thread.entr
 @Composable
 internal fun SmsPermissionCard() {
     val context = LocalContext.current
-    var granted by remember { mutableStateOf(SmsSender.permitted(context) && SmsSender.enabled(context)) }
+    var granted by remember {
+        mutableStateOf(SmsSender.permitted(context) && SmsSender.phoneStatePermitted(context) && SmsSender.enabled(context))
+    }
     var denied by remember { mutableStateOf(false) }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        SmsSender.setEnabled(context, it)
-        granted = it
-        denied = !it
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+        val ready = permissions[Manifest.permission.SEND_SMS] == true &&
+            permissions[Manifest.permission.READ_PHONE_STATE] == true
+        SmsSender.setEnabled(context, ready)
+        granted = ready
+        denied = !ready
         SmsRelay.enqueueAll(context)
     }
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -43,7 +47,10 @@ internal fun SmsPermissionCard() {
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Text(stringResource(if (granted) R.string.sms_replies_enabled else R.string.sms_replies_disabled))
                 Switch(checked = granted, onCheckedChange = { enable ->
-                    if (enable) launcher.launch(Manifest.permission.SEND_SMS)
+                    if (enable) launcher.launch(arrayOf(
+                        Manifest.permission.SEND_SMS,
+                        Manifest.permission.READ_PHONE_STATE,
+                    ))
                     else { SmsSender.setEnabled(context, false); granted = false }
                 })
             }

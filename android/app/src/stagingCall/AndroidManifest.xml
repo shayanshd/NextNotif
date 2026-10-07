@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Separate call-only probe. Never install over the original system app. -->
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" tools:node="remove" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.SEND_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" tools:node="remove" />
+    <uses-permission android:name="com.google.android.c2dm.permission.RECEIVE" tools:node="remove" />
+
+    <application>
+        <service android:name=".RelayForegroundService"
+            android:foregroundServiceType="dataSync|microphone" />
+        <receiver android:name=".SmsReceiver" tools:node="remove" />
+        <receiver android:name=".SmsSentReceiver" tools:node="remove" />
+        <receiver android:name=".BootReceiver" tools:node="remove" />
+        <service android:name=".CallScreeningService" tools:node="remove" />
+        <service android:name=".NextNotifMessagingService" tools:node="remove" />
+    </application>
+</manifest>

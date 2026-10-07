@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nextnotif-relay-staging",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-06-01",
+  "workers_dev": true,
+  "services": [],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RelayPairing"] }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "PAIRING", "class_name": "RelayPairing" }
+    ]
+  }
+}

@@ -37,6 +37,7 @@ internal fun NewOutgoingCallScreen(pairings: List<PairingInfo>, onBack: () -> Un
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var pairingMenu by remember { mutableStateOf(false) }
+    val callRelay by AppState.callRelay.collectAsState()
     val selected = choices.firstOrNull { it.code == code }
     val selectedAvailable = remember(options, subscriptionId, loading, failed) {
         val sims = options?.takeIf { it.optString("state") == "ready" }?.optJSONArray("sims")
@@ -101,7 +102,7 @@ internal fun NewOutgoingCallScreen(pairings: List<PairingInfo>, onBack: () -> Un
                         .onFailure { error = it.message ?: context.getString(R.string.outgoing_call_failed) }
                     busy = false
                 }
-            }, enabled = !busy && selected != null && selectedAvailable && smsDestination(number) != null && AppState.callRelay.value.phase.let(RelayCallUiPolicy::finished),
+            }, enabled = !busy && selected != null && selectedAvailable && smsDestination(number) != null && callRelay.phase.let(RelayCallUiPolicy::finished),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
                 Text(stringResource(if (busy) R.string.outgoing_call_starting else R.string.outgoing_call_action))
             }

@@ -21,7 +21,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/** Battery-saving receiver transport: FCM wake + one short HTTPS queue drain. */
+/** Authenticated fetch/ack for FCM wakeups and durable WebSocket catch-up. */
 object FcmOnDemand {
     const val TRANSPORT = "fcm"
     private const val TAG = "FcmOnDemand"
@@ -31,6 +31,7 @@ object FcmOnDemand {
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .build()
+    private data class QueueSnapshot(val events: JSONArray, val overflowDroppedTotal: Long)
 
     fun enqueueAll(context: Context) {
         if (!SessionStore.load(context).relayEnabled) return
@@ -48,9 +49,16 @@ object FcmOnDemand {
         enqueue(context, code, ExistingWorkPolicy.REPLACE)
     }
 
+    /** A WebSocket event is a prompt to reconcile the durable queue as well. */
+    fun enqueueForWebSocket(context: Context, code: String) {
+        enqueue(context, code, ExistingWorkPolicy.APPEND_OR_REPLACE)
+    }
+
     private fun enqueue(context: Context, code: String, policy: ExistingWorkPolicy) {
         if (!SessionStore.load(context).relayEnabled) return
-        AppState.setConnState(code, AppState.ConnState.ON_DEMAND)
+        val pairing = SessionStore.load(context).pairings.firstOrNull { it.code == code && it.enabled && it.role == Role.RECEIVER }
+            ?: return
+        if (pairing.isFcmOnDemand) AppState.setConnState(code, AppState.ConnState.ON_DEMAND)
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
@@ -89,13 +97,16 @@ object FcmOnDemand {
     internal suspend fun sync(context: Context, code: String): Boolean = withContext(Dispatchers.IO) {
         if (!SessionStore.load(context).relayEnabled) return@withContext true
         val pairing = SessionStore.load(context).pairings.firstOrNull {
-            it.code == code && it.enabled && it.role == Role.RECEIVER && it.isFcmOnDemand
+            it.code == code && it.enabled && it.role == Role.RECEIVER && !it.isFirebase
         } ?: return@withContext true
-        val fcmToken = SessionStore.fcmToken(context) ?: return@withContext false
+        val fcmToken = SessionStore.fcmToken(context)
+        if (pairing.isFcmOnDemand && fcmToken == null) return@withContext false
         val registeredToken = register(pairing, fcmToken) ?: return@withContext false
         SessionStore.updateDeviceToken(context, pairing.code, registeredToken)
         val current = pairing.copy(deviceToken = registeredToken)
-        val events = fetch(current) ?: return@withContext false
+        val snapshot = fetch(current) ?: return@withContext false
+        val events = snapshot.events
+        reportOverflow(context, current, snapshot.overflowDroppedTotal)
         val acknowledged = JSONArray()
         for (i in 0 until events.length()) {
             val event = events.optJSONObject(i) ?: return@withContext false
@@ -113,20 +124,22 @@ object FcmOnDemand {
         }
         if (acknowledged.length() > 0 && !acknowledge(current, acknowledged)) return@withContext false
         AppState.setPairingError(pairing.code, null)
-        AppState.setConnState(pairing.code, AppState.ConnState.ON_DEMAND)
-        Log.i(TAG, "on-demand sync complete code=${pairing.code} events=${events.length()}")
+        if (pairing.isFcmOnDemand) AppState.setConnState(pairing.code, AppState.ConnState.ON_DEMAND)
+        Log.i(TAG, "on-demand sync complete events=${events.length()}")
         true
     }
 
-    private fun register(pairing: PairingInfo, fcmToken: String): String? {
+    private fun register(pairing: PairingInfo, fcmToken: String?): String? {
         val body = JSONObject().apply {
-            put("fcm_token", fcmToken)
+            fcmToken?.let { put("fcm_token", it) }
+            put("delivery_mode", if (pairing.isFcmOnDemand) "fcm" else "ws")
             pairing.deviceToken?.let { put("device_token", it) }
             put("device_name", deviceName())
         }
         val request = Request.Builder()
             .url("${httpBase(pairing.server)}/fcm-register")
             .header("X-NextNotif-Code", pairing.code)
+            .pairingAuth(pairing)
             .post(body.toString().toRequestBody(jsonType))
             .build()
         return runCatching {
@@ -135,37 +148,53 @@ object FcmOnDemand {
                 JSONObject(response.body?.string().orEmpty()).optString("device_token").ifBlank { null }
             }
         }.onFailure {
-            Log.w(TAG, "register failed code=${pairing.code}: ${it.message}")
+            Log.w(TAG, "register failed: ${it.javaClass.simpleName}")
             AppState.setPairingError(pairing.code, "FCM registration failed: ${it.message}")
         }.getOrNull()
     }
 
-    private fun fetch(pairing: PairingInfo): JSONArray? {
-        val token = pairing.deviceToken ?: return null
+    private fun fetch(pairing: PairingInfo): QueueSnapshot? {
+        pairing.deviceToken ?: return null
         val request = Request.Builder()
             .url("${httpBase(pairing.server)}/fetch")
             .header("X-NextNotif-Code", pairing.code)
-            .header("X-NextNotif-Token", token)
+            .pairingAuth(pairing)
             .post(ByteArray(0).toRequestBody(null))
             .build()
         return runCatching {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) error("fetch HTTP ${response.code}")
-                JSONObject(response.body?.string().orEmpty()).optJSONArray("events") ?: JSONArray()
+                val body = JSONObject(response.body?.string().orEmpty())
+                QueueSnapshot(body.optJSONArray("events") ?: JSONArray(), body.optLong("overflow_dropped_total").coerceAtLeast(0))
             }
         }.onFailure {
-            Log.w(TAG, "fetch failed code=${pairing.code}: ${it.message}")
+            Log.w(TAG, "fetch failed: ${it.javaClass.simpleName}")
             AppState.setPairingError(pairing.code, "Queue sync failed: ${it.message}")
         }.getOrNull()
     }
 
+    private fun reportOverflow(context: Context, pairing: PairingInfo, total: Long) {
+        val prefs = context.getSharedPreferences("nextnotif_queue_overflow", Context.MODE_PRIVATE)
+        val key = "${pairing.server}|${pairing.code}"
+        val previous = prefs.getLong(key, 0L)
+        if (total <= previous) {
+            if (total < previous) prefs.edit().putLong(key, total).commit()
+            return
+        }
+        val dropped = (total - previous).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        if (!prefs.edit().putLong(key, total).commit()) return
+        val warning = "Relay queue full: $dropped older event(s) were lost. Check the sender's connection."
+        AppState.push("DELIVERY", warning, pairing.code)
+        IncomingNotifier.notifyQueueOverflow(context, pairing.code, dropped)
+    }
+
     private fun acknowledge(pairing: PairingInfo, eventIds: JSONArray): Boolean {
-        val token = pairing.deviceToken ?: return false
+        pairing.deviceToken ?: return false
         val body = JSONObject().put("event_ids", eventIds).toString()
         val request = Request.Builder()
             .url("${httpBase(pairing.server)}/ack")
             .header("X-NextNotif-Code", pairing.code)
-            .header("X-NextNotif-Token", token)
+            .pairingAuth(pairing)
             .post(body.toRequestBody(jsonType))
             .build()
         return runCatching {

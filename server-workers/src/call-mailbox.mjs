@@ -1,4 +1,5 @@
 export const CALL_TTL_MS = 120000;
+export const CALL_RETENTION_MS = 48 * 60 * 60 * 1000;
 const FINAL = new Set(['failed', 'ended', 'expired']);
 export function validCall(c, now = Date.now()) {
   return c && typeof c.id === 'string' && /^[a-f0-9-]{36}$/.test(c.id) &&
@@ -12,13 +13,14 @@ export function submitCall(records, command, now = Date.now()) {
     old.created_at === command.created_at ? {status: 200, records, command: old} : {status: 409};
   if (!validCall(command, now)) return {status: 400};
   if (records.some(x => !FINAL.has(x.status))) return {status: 409};
-  const retained = records.filter(x => x.created_at > now - 172800000);
+  const retained = records.filter(x => x.created_at > now - CALL_RETENTION_MS);
   const next = {id: command.id, to: command.to, subscription_id: command.subscription_id ?? null,
     created_at: command.created_at, expires_at: command.created_at + CALL_TTL_MS, status: 'queued', detail: ''};
   return {status: 200, records: [...retained, next], command: next};
 }
 export function expireCalls(records, now = Date.now()) {
-  return records.map(x => x.status === 'queued' && x.expires_at <= now
+  return records.filter(x => Number.isSafeInteger(x.created_at) && x.created_at > now - CALL_RETENTION_MS)
+    .map(x => x.status === 'queued' && x.expires_at <= now
     ? {...x, status: 'expired', detail: 'Sender did not place the call before it expired'} : x);
 }
 export function updateCall(records, result) {

@@ -45,9 +45,10 @@ internal object OutgoingCallRelay {
 
     private fun post(pairing: PairingInfo, path: String, body: JSONObject): JSONObject {
         val base = pairing.server.trimEnd('/').replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
+        requireNotNull(pairing.deviceToken)
         val request = Request.Builder().url("$base/$path").header("X-NextNotif-Code", pairing.code)
             .header("X-NextNotif-Role", pairing.role.name.lowercase())
-            .header("X-NextNotif-Token", requireNotNull(pairing.deviceToken))
+            .pairingAuth(pairing)
             .post(body.toString().toRequestBody(json)).build()
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) error("Call relay HTTP ${response.code}")

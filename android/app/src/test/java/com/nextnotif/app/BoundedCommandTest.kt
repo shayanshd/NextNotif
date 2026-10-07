@@ -22,12 +22,12 @@ class BoundedCommandTest {
         override fun destroyForcibly(): Process { destroyed = true; return this }
     }
     @Test fun acceptsOnlySuccessfulExit() {
-        assertTrue(BoundedCommand.successful(FakeProcess(true, 0), 5000))
-        assertFalse(BoundedCommand.successful(FakeProcess(true, 1), 5000))
+        assertTrue(BoundedCommand.successful(FakeProcess(true, 0), 5000, 26))
+        assertFalse(BoundedCommand.successful(FakeProcess(true, 1), 5000, 26))
     }
     @Test fun timeoutKillsProcessAndNeverUsesUnboundedWait() {
         val process = FakeProcess(false, 0)
-        assertFalse(BoundedCommand.successful(process, 5000))
+        assertFalse(BoundedCommand.successful(process, 5000, 26))
         assertTrue(process.destroyed)
         assertEquals(5000L, process.timeout)
     }

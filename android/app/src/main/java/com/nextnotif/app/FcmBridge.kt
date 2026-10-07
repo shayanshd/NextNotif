@@ -13,6 +13,22 @@ object FcmBridge {
     private const val TAG = "NextNotifFCM"
 
     private fun initialize(context: Context): FirebaseApp {
+        if (BuildConfig.BUILD_TYPE == "stagingFcm") {
+            val options = requireNotNull(FirebaseOptions.fromResource(context.applicationContext)) {
+                "Staging FCM requires its own google-services.json"
+            }
+            require(options.applicationId != FirebaseConfig.DEFAULT.appId) {
+                "Staging FCM must use a separate Firebase Android app"
+            }
+            val existing = runCatching { FirebaseApp.getInstance() }.getOrNull()
+            if (existing != null) {
+                require(existing.options.applicationId == options.applicationId) {
+                    "Staging FCM app configuration mismatch"
+                }
+                return existing
+            }
+            return requireNotNull(FirebaseApp.initializeApp(context.applicationContext, options))
+        }
         val cfg = FirebaseConfig.DEFAULT
         val existing = runCatching { FirebaseApp.getInstance() }.getOrNull()
         if (
@@ -21,25 +37,26 @@ object FcmBridge {
             existing.options.apiKey == cfg.apiKey &&
             existing.options.gcmSenderId == cfg.messagingSenderId
         ) {
-            Log.i(TAG, "using existing Android Firebase app ${cfg.appId} key=…${cfg.apiKey.takeLast(6)}")
+            Log.i(TAG, "using existing Android Firebase app")
             return existing
         }
         if (existing != null) {
-            Log.w(TAG, "replacing mismatched default Firebase app ${existing.options.applicationId}")
+            Log.w(TAG, "replacing mismatched default Firebase app")
             existing.delete()
         }
         val builder = FirebaseOptions.Builder()
             .setApiKey(cfg.apiKey)
             .setApplicationId(cfg.appId)
             .setProjectId(cfg.projectId)
-            .setDatabaseUrl(cfg.databaseUrl)
-        cfg.messagingSenderId?.let(builder::setGcmSenderId)
+        builder.setGcmSenderId(cfg.messagingSenderId)
         return requireNotNull(FirebaseApp.initializeApp(context.applicationContext, builder.build())).also {
-            Log.i(TAG, "initialized Android Firebase app ${cfg.appId} sender=${cfg.messagingSenderId} key=…${cfg.apiKey.takeLast(6)}")
+            Log.i(TAG, "initialized Android Firebase app")
         }
     }
 
     fun ensureToken(context: Context, onToken: (String) -> Unit = {}) {
+        // Only the dedicated stagingFcm package has a real staging Firebase app.
+        if (Config.IS_STAGING_BUILD && BuildConfig.BUILD_TYPE != "stagingFcm") return
         initialize(context)
         FirebaseMessaging.getInstance().token
             .addOnSuccessListener { token ->
@@ -50,7 +67,7 @@ object FcmBridge {
                 onToken(token)
             }
             .addOnFailureListener { error ->
-                Log.w(TAG, "FCM token failed: ${error::class.simpleName}: ${error.message}")
+                Log.w(TAG, "FCM token failed: ${error::class.simpleName}")
             }
     }
 }
@@ -67,7 +84,7 @@ class NextNotifMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        Log.i("NextNotifFCM", "FCM message received (keys=${message.data.keys.sorted()})")
+        Log.i("NextNotifFCM", "FCM message received")
         if (message.data["nn"] == "1") {
             SmsRelay.handlePush(this, message.data)
             OutgoingCallRelay.handlePush(this, message.data)

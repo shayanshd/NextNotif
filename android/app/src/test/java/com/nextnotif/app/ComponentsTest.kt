@@ -25,10 +25,9 @@ class ComponentsTest {
     }
 
     @Test
-    fun editingFirebasePairingStaysFirebase() {
-        val fb = pairing(FirebaseRelay.TRANSPORT)
-        assertEquals(FirebaseRelay.TRANSPORT, initialTransportFor(fb))
-        assertEquals("firebase", initialTransportFor(fb))
+    fun editingRetiredFirebasePairingDefaultsToFcmMigration() {
+        val fb = pairing(LEGACY_FIREBASE_TRANSPORT)
+        assertEquals(FcmOnDemand.TRANSPORT, initialTransportFor(fb))
     }
 
     @Test
@@ -142,8 +141,8 @@ class ComponentsTest {
             pairingIssueKind("FCM registration failed: timeout"),
         )
         assertEquals(
-            PairingIssueKind.FIREBASE_CONFIG,
-            pairingIssueKind("Firebase config is invalid (paste apiKey + databaseURL)"),
+            PairingIssueKind.RETIRED_TRANSPORT,
+            pairingIssueKind("Firebase Database pairing retired. Edit this pairing on both phones."),
         )
         assertEquals(PairingIssueKind.NETWORK, pairingIssueKind("failed to connect to host"))
         assertEquals(PairingIssueKind.UNKNOWN, pairingIssueKind("unexpected close"))

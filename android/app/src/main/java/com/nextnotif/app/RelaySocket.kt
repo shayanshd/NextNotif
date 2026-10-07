@@ -41,6 +41,7 @@ class RelaySocket(
     private val deviceToken: String? = null,
     private var fcmToken: String? = null,
     private val fcmOnDemand: Boolean = false,
+    private val deviceId: String? = null,
     private val onEvent: (Event) -> Unit,
 ) {
     companion object {
@@ -89,6 +90,10 @@ class RelaySocket(
         val req = Request.Builder()
             .url(url)
             .header("X-NextNotif-Code", code)
+            .apply {
+                deviceId?.let { header("X-NextNotif-Device-Id", it) }
+                deviceToken?.let { header("X-NextNotif-Token", it) }
+            }
             .build()
         ws = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -118,6 +123,7 @@ class RelaySocket(
                             put("token", token)
                             put("code", code)
                             receiverDeliveryMode(role, fcmOnDemand)?.let { put("delivery_mode", it) }
+                            if (role == Role.RECEIVER && !fcmOnDemand) put("queue_sync", true)
                             deviceToken?.let { put("device_token", it) }
                             fcmToken?.let { put("fcm_token", it) }
                         }
@@ -379,10 +385,10 @@ internal class DohFirstDns(private val context: android.content.Context) : Dns {
                         }
                         Log.w(TAG, "DoH $base (lenient) no answer")
                     } catch (t2: Throwable) {
-                        Log.w(TAG, "DoH $base (lenient) failed: ${t2.message}")
+                        Log.w(TAG, "DoH $base (lenient) failed: ${t2.javaClass.simpleName}")
                     }
                 } else {
-                    Log.w(TAG, "DoH $base failed: ${t.message}", t)
+                    Log.w(TAG, "DoH $base failed: ${t.javaClass.simpleName}")
                 }
                 // Network-level failure (RST, stall, blocked egress, sinkholed
                 // endpoint host). On censoring networks these persist for

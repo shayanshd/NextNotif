@@ -1,0 +1,34 @@
+# Samsung A5 private MVP controlled replacement plan
+
+Status: **plan only** (2026-10-07). The owner chose replacement of the original `com.nextnotif.app` system app for the private MVP. No replacement, package-data reset, production Worker deployment, or carrier send is authorized by this plan.
+
+## Why this needs a maintenance window
+
+The installed Samsung system app and the new privately signed APK use different signing certificates. Android cannot update `com.nextnotif.app` in place across that boundary. The original app lives in the `nextnotif_privapp` Magisk module at `/system/priv-app/NextNotif/NextNotif.apk`; `tools/install-call-relay-module.sh` writes that module directly and must not be used as a first cutover step. Schedule a period when forwarding can be paused and the owner can verify both phones and recover the A5 if boot or package scanning fails.
+
+## Gates before touching the original package
+
+1. Freeze and review one clean source commit and versionCode; run CI, privacy/security checks, Android unit tests and lint, and produce a newly signed APK from that exact commit. Record package, versionCode, minSdk, certificate fingerprint, APK SHA-256, merged permissions, and Firebase project ID without printing secrets. Back up the private signing key and its recovery instructions in a separate permanent location; verify that backup can be read by the owner.
+2. Deploy and validate new relay behavior on staging, including seven-day queue retention and existing-data migration. Prepare a production backend rollout compatible with old clients, prove migration and rollback on a copy of production-style KV state, then deploy backend before any new client. Verify existing production pairings still work before changing Samsung. Keep the previous Worker version and rollback procedure available.
+3. Resolve the private-MVP pairing rotation method and identify each original pairing that must be revoked or recreated. Record only pairing labels/roles and counts; never print invites, tokens, message bodies, phone numbers, or signing material. Confirm the receiving phone and a fresh invite path are available. If original credentials cannot be migrated safely, plan owner-visible revoke/delete and re-pair.
+4. Keep both SIM choices visible as the owner requested, and label SIM 2 as unvalidated in private release notes. Finish non-carrier SMS failure/idempotency checks, physical-device revocation, and the API 26+ sender/modern receiver idle, restart, and catch-up checks. Later SIM 2 and multipart carrier sends require exact recipient, text, and count approved before each send.
+5. On the connected Samsung, reverify serial/model/API, root/Magisk health, exact package path, original signer and APK hash, module contents and enabled state, installed runtime permissions, and whether any update lives in `/data/app`. Reverify the staging-call module separately. A changed observation stops this plan for revision.
+6. Make an owner-controlled, encrypted, verified backup of the entire original `nextnotif_privapp` module and relevant original app data before any write. Keep the backup off the phone and out of Git; record only paths and checksums in a private operator record. Ensure recovery access works if Android fails to boot. The old signing certificate/APK alone is insufficient to restore pairing data. Rehearse exact restore steps before live cutover.
+
+## Rehearsal and cutover sequence
+
+1. Rehearse signer-change behavior with a disposable same-package test fixture or spare A5. Prove the old module can be disabled and restored, Android scans the new privileged package with its allowlist, and a data reset or re-pair is performed only if required and approved. Verify restore after a failed new-app launch. Side-by-side staging updates do not prove this.
+2. Start a short maintenance window. Confirm both phones and the production relay are reachable. Record a content-free baseline: old app functioning, pairing count/roles, relay status, module/APK hashes, and runtime grants. Quiesce forwarding through the app UI if possible and verify it has stopped before the module switch.
+3. Preserve original module and app-data backups. Disable the original module and reboot; verify the old `com.nextnotif.app` is absent or inactive before enabling the new package. If a firmware copy remains at the same path, stop and revise the method. Never leave two active packages with `com.nextnotif.app` or change `nextnotif_staging_call`.
+4. Install the frozen, signed private APK as a separately prepared, reversible Magisk module with its matching privileged-permission allowlist; verify every file and mode before enabling it. Reboot and verify Android accepts the package, shows the new certificate/version, grants only expected permissions, and starts without a migration error. A signer conflict, missing package, boot loop, or unexpected data reset triggers rollback.
+5. Apply the approved data transition. When a clean package-data reset is required, do it only after verified backup and record that old local history will not appear in the new app. Recreate or rotate pairings using copied single-use invites; verify creator-side deletion revokes both former devices and queued content. Confirm old relay credentials no longer work. Keep secrets out of logs and handoff.
+6. Check one synthetic production notification and ACK, one inbound SMS observation with the owner, and receiver recovery after app restart/screen-off. A live SMS send or call needs its own exact approval. Keep side-by-side staging probes disabled for overlapping incoming-SMS tests so duplicates cannot obscure the result.
+7. Observe a defined canary period and inspect only content-free health evidence: duplicate/overflow counts, FCM wake/fetch/ACK, permission state, crash/ANR state, and battery restrictions. Record success or rollback decision against frozen APK and Worker versions.
+
+## Rollback
+
+If the new package fails before data transition, disable only its module, restore and enable the saved original module, reboot, then verify original signer, APK hash, pairings, and forwarding status. If original package data was reset, restore the verified encrypted data backup using the rehearsed recovery procedure before enabling forwarding; if data cannot be restored, stop and tell the owner that re-pairing is required. Roll back the Worker separately only if the previous version still supports the current client/pairing state; a Worker rollback does not reverse data migration. Preserve diagnostic facts without content or credentials.
+
+## Release boundary
+
+This is a gated operating procedure, not an executable script. Before the live maintenance window, turn verified device-specific checks and rollback into an operator checklist with exact artifact hashes and commands. Obtain explicit approval for final device replacement and any package-data deletion. The separate signing-key backup is still outstanding.

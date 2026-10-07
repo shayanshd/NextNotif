@@ -11,6 +11,26 @@
     <string name="setup_receiver">Receiver</string>
     <string name="setup_receiver_desc">Gets alerts for the other phone</string>
     <string name="setup_pairing_label">Pairing</string>
+    <string name="setup_invite_mode_label">Pairing setup</string>
+    <string name="setup_invite_create">Create an invite</string>
+    <string name="setup_invite_create_desc">Set up this phone, then copy an invite to the other phone</string>
+    <string name="setup_invite_join">Join with an invite</string>
+    <string name="setup_invite_join_desc">Paste the invite copied from the first phone</string>
+    <string name="setup_invite_label">Invite text</string>
+    <string name="setup_invite_helper">Paste the complete invite. It includes the relay address, code, and one-time secret.</string>
+    <string name="setup_invite_invalid">This invite is incomplete or invalid.</string>
+    <string name="setup_invite_invalid_server">Enter a valid WebSocket relay address.</string>
+    <string name="setup_invite_existing_code">This code is already used on this phone. Remove the old pairing or use a different invite.</string>
+    <string name="setup_invite_failed">Pairing could not be completed.</string>
+    <string name="setup_invite_server">Relay: %1$s</string>
+    <string name="setup_invite_create_action">Create pairing</string>
+    <string name="setup_invite_join_action">Join pairing</string>
+    <string name="setup_invite_share_title">Copy pairing invite</string>
+    <string name="setup_invite_share_body">Copy this invite and paste it on the other phone within 15 minutes. It can be used once. Keep it private; if you lose it, remove this pairing and create a new one.</string>
+    <string name="setup_invite_copy">Copy invite</string>
+    <string name="setup_invite_copied">Copied</string>
+    <string name="setup_invite_done">Done</string>
+    <string name="setup_secure_identity_locked">This pairing’s role and relay are fixed. To change them, remove the pairing and create a new invite.</string>
     <string name="setup_code_label">Pairing code</string>
     <string name="setup_code_helper">Both phones must use the same code</string>
     <string name="setup_generate">Generate code</string>
@@ -26,17 +46,8 @@
     <string name="setup_transport_ws_desc">Always connected; fastest delivery</string>
     <string name="setup_transport_fcm">FCM on demand</string>
     <string name="setup_transport_fcm_desc">Sleeps until an alert arrives</string>
-    <string name="setup_transport_fb">Firebase</string>
-    <string name="setup_transport_fb_desc">Peer-to-peer, no server needed</string>
-    <string name="setup_code_helper_fb">Both phones must use the same 6-digit code — that\'s the only shared credential</string>
-    <string name="setup_fb_config_label">Firebase web config</string>
-    <string name="setup_fb_config_helper">Paste the web-app config from the Firebase console (needs apiKey + databaseURL)</string>
-    <string name="setup_fb_config_invalid">That doesn\'t look like a Firebase config (needs apiKey + databaseURL)</string>
-    <string name="setup_fb_relay_label">Firebase relay</string>
-    <string name="setup_fb_builtin_note">Uses the built-in NextNotif relay. Just pick a 6-digit code on each phone — no secret needed.</string>
-    <string name="setup_fb_use_own">Use your own Firebase project</string>
-    <string name="setup_fb_use_builtin">Use the built-in relay instead</string>
-    <string name="setup_fb_recommended">Recommended</string>
+    <string name="setup_legacy_firebase_migration">This Firebase Database pairing is retired. Add a new FCM or WebSocket pairing on both phones with a new code, then remove this old pairing after delivery works.</string>
+    <string name="setup_recommended">Recommended</string>
     <string name="setup_live_call_label">Optional live calls</string>
     <string name="setup_live_call_title">Live call relay (beta)</string>
     <string name="setup_live_call_helper">Live calling depends on phone support and may need extra setup</string>
@@ -74,8 +85,7 @@
     <string name="home_role_receiver">Receiver phone</string>
     <string name="home_role_sender_short">Sender</string>
     <string name="home_role_receiver_short">Receiver</string>
-    <string name="home_transport_firebase">Firebase</string>
-    <string name="home_transport_firebase_own">Firebase (own)</string>
+    <string name="home_transport_firebase">Firebase Database (retired)</string>
     <string name="home_transport_fcm">FCM on demand</string>
     <string name="home_activity">Activity</string>
     <string name="home_activity_empty">Waiting for messages and calls...</string>
@@ -85,7 +95,7 @@
     <string name="home_messages_title">Messages</string>
     <string name="home_messages_clear">Clear history</string>
     <string name="home_messages_clear_confirm_title">Clear communication history?</string>
-    <string name="home_messages_clear_confirm_body">This removes all saved texts, call updates, and relay tests from this phone only. Queued SMS requests will still be sent. Pairings and the activity log are not changed.</string>
+    <string name="home_messages_clear_confirm_body">This clears visible texts, call updates, and relay tests on this phone. Completed or uncertain outgoing SMS details are erased; pending requests keep their recipient and text until delivery finishes. Queued requests will still be sent. Pairings and the activity log are unchanged.</string>
     <string name="home_messages_clear_confirm_action">Clear history</string>
     <string name="home_messages_filter_all">All pairings</string>
     <string name="home_messages_filter_empty_title">Nothing from this pairing yet</string>
@@ -141,7 +151,6 @@
     <string name="home_status_offline_detail">Check this phone’s internet connection. NextNotif will retry automatically.</string>
     <string name="home_status_paused">Paused</string>
     <string name="home_status_paused_detail">Start this pairing to resume forwarding.</string>
-    <string name="home_issue_firebase_config">Edit this pairing and check its Firebase settings.</string>
     <string name="home_issue_alert_registration">Check internet access and Google Play services, then restart this pairing.</string>
     <string name="home_issue_queue_sync">Some alerts are waiting to send. Check internet access; NextNotif will retry.</string>
     <string name="home_issue_access_denied">The relay denied access. Edit this pairing and check its code and connection settings.</string>
@@ -166,6 +175,8 @@
     <string name="reset_confirm_body">This phone will disconnect and you\'ll need to set up again.</string>
     <string name="remove_pairing_title">Remove pairing?</string>
     <string name="remove_pairing_body">This phone will stop relaying with the phone paired under code %1$s. Other pairings are not affected. You can add it again later.</string>
+    <string name="remove_pairing_owner_body">Delete pairing %1$s? The other phone will disconnect and queued relay data will be erased. This cannot be undone.</string>
+    <string name="remove_pairing_joiner_body">Remove pairing %1$s from this phone? Relay data remains until the phone that created the pairing deletes it.</string>
     <string name="remove_pairing_confirm">Remove</string>
 
     <string name="detail_activity">Activity</string>
@@ -282,7 +293,7 @@
     <string name="conversation_history_only">Forwarded text history</string>
     <plurals name="conversation_count"><item quantity="one">%d message</item><item quantity="other">%d messages</item></plurals>
     <string name="sms_permission_title">Send replies from your receiver</string>
-    <string name="sms_permission_body">Allow NextNotif to send SMS through the SIM selected on the receiver, or this phone’s default SMS SIM when you tap Send on a paired receiver. Carrier charges apply.</string>
+    <string name="sms_permission_body">Allow SMS and phone access to send through the SIM selected on the receiver, or this phone’s default SMS SIM when you tap Send on a paired receiver. Carrier charges apply.</string>
     <string name="sms_permission_action">Allow SMS sending</string>
     <string name="sms_pairing_unavailable">Enable a receiver pairing to send SMS.</string>
     <string name="sms_receiver_only">Open this conversation on your receiver phone to send a reply.</string>

@@ -1,4 +1,5 @@
-import { AuthorizationError, createSecure, joinSecure, restoreSecure } from './secure-pairing.mjs';
+import { AuthorizationError, authorizeDeletion, createSecure, deletionIdentity, joinSecure, restoreSecure } from './secure-pairing.mjs';
+import { consumePairingBudget, JOIN_ATTEMPTS_PER_MINUTE } from './pairing-rate-limit.mjs';
 
 const KEY = 'secureRecord';
 // Uses the transactional KV API supported by both existing relay backends.
@@ -54,6 +55,35 @@ export class SecurePairingStore {
   }
 
   async join(secret, role, now) {
+    // Unknown codes must not create persistent rate-limit state.
+    this.decode(await this.storage.get(KEY));
+    await consumePairingBudget(this.storage, 'secureJoinBudget', JOIN_ATTEMPTS_PER_MINUTE, now * 1000);
     return this.transition(record => joinSecure(record, secret, role, now));
+  }
+
+  async delete(ownerId, token) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const mode = await this.storage.get('securityMode');
+      if (mode === 'deleted_v1') {
+        await authorizeDeletion(await this.storage.get('deletionRecord'), ownerId, token);
+        return false;
+      }
+      if (mode !== 'invite_v1') throw new AuthorizationError();
+      const snapshot = await this.storage.get(KEY);
+      const identity = await deletionIdentity(this.decode(snapshot), ownerId, token);
+      const committed = await this.storage.transaction(async txn => {
+        if (await txn.get(KEY) !== snapshot || await txn.get('securityMode') !== 'invite_v1') return false;
+        // This relay stores pairing content only in DO KV. Clear all historical
+        // keys, including queued events, FCM tokens, and SMS/call commands.
+        const keys = [...(await txn.list()).keys()];
+        for (const key of keys) await txn.delete(key);
+        await txn.put({ securityMode: 'deleted_v1', deletionRecord: { ...identity, cleanup_pending: false } });
+        return true;
+      });
+      if (!committed) continue;
+      await this.storage.sync();
+      return true;
+    }
+    throw new AuthorizationError();
   }
 }

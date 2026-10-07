@@ -22,7 +22,9 @@ NextNotif reuses an existing Android handset and SIM as the gateway instead of r
 
 - The sender may be an Android 8-era phone that stays plugged in and unattended.
 - The receiver is the phone the user carries and interacts with.
-- Pairings can use the built-in Firebase relay, a user-supplied Firebase project, or a WebSocket relay.
+- New pairings use a copied, single-use invite with the Worker relay. FCM on demand
+  and WebSocket are the supported delivery modes. Retired Firebase Database pairings
+  remain visible only for migration guidance.
 - The preferred MVP path is FCM/HTTPS while idle, with a temporary authenticated
   live connection only while an answered call is being relayed.
 - Full cellular-audio bridging is experimental and must be proven per sender device and firmware.
@@ -32,8 +34,12 @@ NextNotif reuses an existing Android handset and SIM as the gateway instead of r
 
 ## Capabilities and Constraints
 
-- Shipped capabilities include many-to-many pairing, SMS forwarding and receiver-composed SMS sending through the paired sender SIM, incoming and receiver-initiated live calls through the sender SIM, incoming-call state and caller-ID forwarding, receiver notifications, offline queues, and reconnect behavior.
-- SMS sending needs no root. It uses an explicit opt-in and a receiver-selected active sender SIM or the sender phone’s default SMS SIM; receivers can send through FCM and WebSocket-server pairings. Custom Firebase Database transport supports SMS forwarding but not remote SMS commands.
+- The private MVP scope includes SMS forwarding, receiver-composed SMS sending
+  through the paired sender SIM, incoming-call information, receiver notifications,
+  history, offline queues, and recovery. These features still have open release gates.
+- SMS sending needs no root. It uses an explicit opt-in and a receiver-selected active
+  sender SIM or the sender phone’s default SMS SIM.
+- Receiver-initiated live calls through a rooted Samsung A5 remain a separate beta.
 - The supported baseline is Android 8.0 (API 26) and newer.
 - Ordinary third-party apps cannot assume access to cellular call RX/TX audio.
 - Remote call control and call-audio experiments require explicit user action and device testing.
@@ -47,7 +53,9 @@ The product name is NextNotif. Interface language is direct, practical, and tran
 ## Evidence on Hand
 
 - Existing Android app and relay implementations in this repository.
-- A two-device end-to-end test history recorded in `roadmap.md`.
+- Staging device evidence and open gates are recorded in
+  [MVP production handoff](MVP_PRODUCTION_HANDOFF.md) and
+  [Production readiness](PRODUCTION_READINESS.md).
 - A Samsung Galaxy A5 SM-A520F running Android 8 is available for physical-device testing.
 - Controlled hardware experiments established digital `VOICE_DOWNLINK` capture and
   root-only telephony-uplink injection on the reference SM-A520F. Two-way relay works,

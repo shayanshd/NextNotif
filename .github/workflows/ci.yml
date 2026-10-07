@@ -17,11 +17,36 @@ jobs:
         run: cd server && pip install -r requirements.txt && python test_smoke.py
       - name: Run TLS smoke test
         run: cd server && python test_tls.py
+      - name: Run relay security and mailbox tests
+        run: cd server && python -m unittest test_secure_pairing test_secure_pairing_store test_sms_mailbox test_call_mailbox test_webrtc_probe
 
-  # No Cloudflare Workers job here on purpose: wrangler dev requires a logged-in
-  # wrangler account, which CI does not have. Workers are tested locally instead:
-  # start `npx wrangler dev --port 8787` in server-workers/, then run
-  # `python test_smoke.py` from server-workers/.
+  worker:
+    name: Worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run Worker security, mailbox, and TURN tests
+        run: |
+          node server-workers/test_secure_pairing.mjs
+          node server-workers/test_secure_pairing_store.mjs
+          node server-workers/test_sms_mailbox.mjs
+          node server-workers/test_call_mailbox.mjs
+          node server-workers/test_turn_credentials.mjs
+          node server-workers/test_relay_input.mjs
+          node server-workers/test_relay_queue.mjs
+          node server-workers/test_pairing_rate_limit.mjs
+      - name: Test secure WebSocket in local workerd
+        run: |
+          python -m pip install websockets==17.1
+          npm install --prefix server-workers --no-save wrangler@4.131.1
+          NEXTNOTIF_WRANGLER="$PWD/server-workers/node_modules/.bin/wrangler" python server-workers/test_secure_websocket.py
+          NEXTNOTIF_WRANGLER="$PWD/server-workers/node_modules/.bin/wrangler" NEXTNOTIF_SECURITY_TEST_CONFIG=wrangler.security-test-kv.jsonc python server-workers/test_secure_websocket.py
 
   android:
     name: Android build + tests
@@ -32,9 +57,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Test and build APKs
-        run: cd android && ./gradlew testDebugUnitTest assembleDebug assembleRelease --no-daemon
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ci-apks
-          path: android/app/build/outputs/apk/**/*.apk
+      - uses: android-actions/setup-android@v3
+      - name: Use non-production Firebase config for compile checks
+        run: cp android/app/google-services.ci.json android/app/google-services.json
+      - name: Test, lint, and build unsigned APKs
+        run: cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease --no-daemon

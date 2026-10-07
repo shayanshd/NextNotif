@@ -110,7 +110,9 @@ object SessionStore {
                 p.transport?.let { put("transport", it) }
                 p.fbConfig?.let { put("fbConfig", it) }
                 p.secret?.let { put("secret", it) }
+                p.deviceId?.let { put("deviceId", it) }
                 p.deviceToken?.let { put("deviceToken", it) }
+                put("ownsPairing", p.ownsPairing)
                 p.label?.let { put("label", it) }
                 put("enabled", p.enabled)
                 put("liveCallEnabled", p.liveCallEnabled)
@@ -135,7 +137,9 @@ object SessionStore {
                     transport = o.optString("transport").ifBlank { null },
                     fbConfig = o.optString("fbConfig").ifBlank { null },
                     secret = o.optString("secret").ifBlank { null },
+                    deviceId = o.optString("deviceId").ifBlank { null },
                     deviceToken = o.optString("deviceToken").ifBlank { null },
+                    ownsPairing = o.optBoolean("ownsPairing", false),
                     label = o.optString("label").ifBlank { null },
                     enabled = o.optBoolean("enabled", true),
                     liveCallEnabled = o.optBoolean("liveCallEnabled", false),
@@ -149,15 +153,15 @@ object SessionStore {
     }
 
     fun save(ctx: Context, state: SessionState) {
-        saveTo(ctx.getSharedPreferences(P, Context.MODE_PRIVATE), state)
+        saveTo(ProtectedPreferences.from(ctx, P), state)
     }
 
     fun load(ctx: Context): SessionState {
-        return loadFrom(ctx.getSharedPreferences(P, Context.MODE_PRIVATE))
+        return loadFrom(ProtectedPreferences.from(ctx, P))
     }
 
     fun clear(ctx: Context) {
-        clear(ctx.getSharedPreferences(P, Context.MODE_PRIVATE))
+        clear(ProtectedPreferences.from(ctx, P))
     }
 
     // The last address that completed a full relay handshake, per host. On
@@ -165,17 +169,17 @@ object SessionStore {
     // worked; it goes stale only when the provider rotates edge addresses,
     // which the probe detects (fast TCP refusal, not a stall).
     fun goodIp(ctx: Context, host: String): String? =
-        ctx.getSharedPreferences(P, Context.MODE_PRIVATE).getString("good_ip_$host", null)
+        ProtectedPreferences.from(ctx, P).getString("good_ip_$host", null)
 
     fun rememberGoodIp(ctx: Context, host: String, ip: String) {
-        ctx.getSharedPreferences(P, Context.MODE_PRIVATE).edit().putString("good_ip_$host", ip).apply()
+        ProtectedPreferences.from(ctx, P).edit().putString("good_ip_$host", ip).apply()
     }
 
     fun fcmToken(ctx: Context): String? =
-        ctx.getSharedPreferences(P, Context.MODE_PRIVATE).getString("fcm_token", null)
+        ProtectedPreferences.from(ctx, P).getString("fcm_token", null)
 
     fun saveFcmToken(ctx: Context, token: String) {
-        ctx.getSharedPreferences(P, Context.MODE_PRIVATE).edit().putString("fcm_token", token).apply()
+        ProtectedPreferences.from(ctx, P).edit().putString("fcm_token", token).apply()
     }
 
     @Synchronized

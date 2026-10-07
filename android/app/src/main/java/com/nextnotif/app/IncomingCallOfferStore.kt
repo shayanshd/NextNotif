@@ -21,27 +21,29 @@ internal object IncomingCallOfferStore {
         return current
     }
 
-    private fun read(context: Context): IncomingCallOffer? = runCatching {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null) ?: return null
-        val json = JSONObject(raw)
-        IncomingCallOffer(json.getString("code"), json.optString("number").ifBlank { null },
-            json.optString("name").ifBlank { null }, json.getLong("ts"))
-    }.getOrNull()
+    private fun read(context: Context): IncomingCallOffer? {
+        val raw = ProtectedPreferences.from(context, PREFS).getString(KEY, null) ?: return null
+        return runCatching {
+            val json = JSONObject(raw)
+            IncomingCallOffer(json.getString("code"), json.optString("number").ifBlank { null },
+                json.optString("name").ifBlank { null }, json.getLong("ts"))
+        }.getOrNull()
+    }
 
     @Synchronized
     fun observe(context: Context, code: String, state: String, available: Boolean,
                 timestamp: Long?, number: String?, name: String?) {
         val offer = next(read(context), code, state, available, timestamp, number, name, System.currentTimeMillis())
-        val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        val editor = ProtectedPreferences.from(context, PREFS).edit()
         if (offer == null) editor.remove(KEY) else editor.putString(KEY, JSONObject()
             .put("code", offer.code).put("number", offer.number ?: "").put("name", offer.name ?: "")
             .put("ts", offer.offeredAt).toString())
-        editor.commit()
+        check(editor.commit()) { "Unable to persist incoming call offer" }
     }
 
     @Synchronized
     fun clear(context: Context, code: String) {
-        if (read(context)?.code == code) context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (read(context)?.code == code) ProtectedPreferences.from(context, PREFS)
             .edit().remove(KEY).commit()
     }
 

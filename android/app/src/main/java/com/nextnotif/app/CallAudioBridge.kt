@@ -213,8 +213,8 @@ class CallAudioBridge(
     internal fun metricsSnapshot(): CallAudioMetrics = metrics.snapshot()
 
     private fun fail(t: Throwable) {
-        val detail = t.message ?: t.javaClass.simpleName
-        Log.e(TAG, detail, t)
+        val detail = t.javaClass.simpleName
+        Log.e(TAG, "call audio failed: $detail")
         onError(detail)
         stop()
     }
@@ -357,14 +357,14 @@ internal object GatewayUplinkRoute {
         val process = ProcessBuilder("su", "-c", "$SCRIPT $value; done; exit 127")
             .redirectErrorStream(true)
             .start()
-        if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
-            process.destroyForcibly()
+        if (!CompatProcess.waitFor(process, 5_000)) {
+            CompatProcess.destroy(process)
             Log.e(TAG, "route=$value timed out")
             return@runCatching false
         }
-        val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+        process.inputStream.bufferedReader().use { it.readText() }
         val exit = process.exitValue()
-        Log.i(TAG, "route=$value exit=$exit output=${output.take(120)}")
+        Log.i(TAG, "route=$value exit=$exit")
         exit == 0
-    }.onFailure { Log.e(TAG, "route=$value failed", it) }.getOrDefault(false)
+    }.onFailure { Log.e(TAG, "route=$value failed: ${it.javaClass.simpleName}") }.getOrDefault(false)
 }

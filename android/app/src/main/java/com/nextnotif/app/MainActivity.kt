@@ -1,6 +1,9 @@
 package com.nextnotif.app
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -19,8 +22,11 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -50,8 +56,12 @@ class MainActivity : ComponentActivity() {
     private val nav = mutableStateOf<List<AppScreen>>(listOf(AppScreen.Home))
     private val connecting = mutableStateOf(false)
     private val uiError = mutableStateOf<String?>(null)
+    private val pendingInvite = mutableStateOf<String?>(null)
+    private val inviteCopied = mutableStateOf(false)
     private val showResetConfirm = mutableStateOf(false)
     private val removeTarget = mutableStateOf<PairingInfo?>(null)
+    private val removingPairing = mutableStateOf(false)
+    private val removeError = mutableStateOf<String?>(null)
     private val notifPermMissing = mutableStateOf(false)
     private val permGateMissing = mutableStateOf<List<MissingPerm>>(emptyList())
     private val permAskAttempted = mutableStateOf(false)
@@ -97,6 +107,7 @@ class MainActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
+                    if (pendingInvite.value != null) return
                     val stack = nav.value
                     if (stack.size > 1) {
                         nav.value = stack.dropLast(1)
@@ -198,14 +209,13 @@ class MainActivity : ComponentActivity() {
                                 busyLabel = if (connecting.value) stringResource(R.string.setup_connecting) else null,
                                 error = uiError.value,
                                 onBack = { nav.value = nav.value.dropLast(1) },
-                                onGenerateCode = { server, onResult -> generateCode(server, onResult) },
                                 contactsPermissionGranted = contactsPermissionGranted.value,
                                 contactsPermissionDenied = contactsPermissionAskAttempted.value &&
                                     !contactsPermissionGranted.value,
                                 contactsPermissionNeedsSettings = contactPermissionNeedsSettings(),
                                 onRequestContactsPermission = { requestContactsPermission() },
                                 onOpenAppSettings = { openAppSettings() },
-                                onSubmit = { label, role, code, server, transport, fbConfig, liveCallEnabled ->
+                                onSubmit = { label, role, code, server, transport, liveCallEnabled, setupMode, inviteSecret ->
                                     uiError.value = null
                                     handleAction(
                                         UiAction.UpsertPairing(
@@ -214,14 +224,41 @@ class MainActivity : ComponentActivity() {
                                             code,
                                             server,
                                             transport,
-                                            fbConfig,
+                                            null,
                                             liveCallEnabled,
+                                            setupMode,
+                                            inviteSecret,
                                         ),
                                     )
                                 },
                             )
                         }
                     }
+                }
+
+                pendingInvite.value?.let { invite ->
+                    AlertDialog(
+                        onDismissRequest = { /* Keep the one-time invite visible until copied. */ },
+                        title = { Text(stringResource(R.string.setup_invite_share_title)) },
+                        text = {
+                            SelectionContainer {
+                                Text(stringResource(R.string.setup_invite_share_body) + "\n\n" + invite)
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("NextNotif pairing invite", invite))
+                                inviteCopied.value = true
+                            }) { Text(stringResource(if (inviteCopied.value) R.string.setup_invite_copied else R.string.setup_invite_copy)) }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                enabled = inviteCopied.value,
+                                onClick = { pendingInvite.value = null; inviteCopied.value = false },
+                            ) { Text(stringResource(R.string.setup_invite_done)) }
+                        },
+                    )
                 }
 
                 if (showResetConfirm.value) {
@@ -247,19 +284,30 @@ class MainActivity : ComponentActivity() {
 
                 removeTarget.value?.let { target ->
                     AlertDialog(
-                        onDismissRequest = { removeTarget.value = null },
+                        onDismissRequest = { if (!removingPairing.value) removeTarget.value = null },
                         title = { Text(stringResource(R.string.remove_pairing_title)) },
-                        text = { Text(stringResource(R.string.remove_pairing_body, target.code)) },
+                        text = {
+                            Column {
+                                Text(stringResource(
+                                    if (target.ownsPairing) R.string.remove_pairing_owner_body
+                                    else if (target.deviceId != null) R.string.remove_pairing_joiner_body
+                                    else R.string.remove_pairing_body,
+                                    target.code,
+                                ))
+                                removeError.value?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                            }
+                        },
                         confirmButton = {
-                            TextButton(onClick = {
-                                removeTarget.value = null
+                            TextButton(enabled = !removingPairing.value, onClick = {
+                                removeError.value = null
                                 handleAction(UiAction.RemovePairing(target.code))
                             }) {
                                 Text(stringResource(R.string.remove_pairing_confirm))
                             }
                         },
                         dismissButton = {
-                            TextButton(onClick = { removeTarget.value = null }) {
+                            TextButton(enabled = !removingPairing.value,
+                                onClick = { removeTarget.value = null; removeError.value = null }) {
                                 Text(stringResource(R.string.cancel))
                             }
                         },
@@ -437,29 +485,7 @@ class MainActivity : ComponentActivity() {
                 if (!launched) openAppSettings()
             }
             is UiAction.RemovePairing -> {
-                val cur = SessionStore.load(this)
-                val remaining = cur.pairings.filterNot { it.code == action.code }
-                if (remaining.isEmpty()) {
-                    SessionStore.save(
-                        this,
-                        cur.copy(
-                            pairings = emptyList(),
-                            code = null,
-                            server = Config.DEFAULT_SERVER,
-                    deviceToken = null,
-                    transport = null,
-                    fbConfig = null,
-                        ),
-                    )
-                    RelayForegroundService.Controller.stop(this)
-                    AppState.clearStates()
-                } else {
-                    SessionStore.save(this, cur.copy(pairings = remaining))
-                    if (cur.relayEnabled) restartRelay(remaining)
-                }
-                refreshSession()
-                refreshPermissionState()
-                goHome()
+                removePairing(action.code)
             }
             is UiAction.SetPairingEnabled -> {
                 val cur = SessionStore.load(this)
@@ -482,24 +508,89 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun removePairing(code: String) {
+        val pairing = SessionStore.load(this).pairings.firstOrNull { it.code == code } ?: run {
+            removeTarget.value = null
+            return
+        }
+        if (!pairing.ownsPairing) {
+            removeLocalPairing(code)
+            return
+        }
+        removingPairing.value = true
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { SecurePairingClient.delete(pairing) }
+            }
+            removingPairing.value = false
+            if (result.isFailure) {
+                removeError.value = result.exceptionOrNull()?.message
+                    ?: getString(R.string.setup_invite_failed)
+                return@launch
+            }
+            removeLocalPairing(code)
+        }
+    }
+
+    private fun removeLocalPairing(code: String) {
+        val cur = SessionStore.load(this)
+        val remaining = cur.pairings.filterNot { it.code == code }
+        if (remaining.isEmpty()) {
+            SessionStore.save(this, cur.copy(
+                pairings = emptyList(), code = null, role = null,
+                server = Config.DEFAULT_SERVER, deviceToken = null,
+                transport = null, fbConfig = null, secret = null,
+            ))
+            RelayForegroundService.Controller.stop(this)
+            AppState.clearStates()
+        } else {
+            SessionStore.save(this, cur.copy(pairings = remaining))
+            if (cur.relayEnabled) restartRelay(remaining)
+        }
+        removeTarget.value = null
+        removeError.value = null
+        refreshSession()
+        refreshPermissionState()
+        goHome()
+    }
+
     private fun upsertPairing(a: UiAction.UpsertPairing) {
-        val isFirebase = a.transport == FirebaseRelay.TRANSPORT
+        if (!Config.allowsServer(a.server)) {
+            uiError.value = "Staging app only connects to ${Config.DEFAULT_SERVER}"
+            return
+        }
+        if (a.setupMode != PairingSetupMode.EDIT) {
+            upsertSecurePairing(a)
+            return
+        }
+        if (a.transport == LEGACY_FIREBASE_TRANSPORT) {
+            uiError.value = getString(R.string.setup_legacy_firebase_migration)
+            return
+        }
+        val saved = SessionStore.load(this).pairings.firstOrNull { it.code == a.code }
+        if (saved?.deviceId != null &&
+            (saved.role != a.role ||
+                saved.server.trim().trimEnd('/') != a.server.trim().trimEnd('/'))) {
+            uiError.value = getString(R.string.setup_secure_identity_locked)
+            return
+        }
         val preferencesOnly = canSavePairingPreferencesOffline(
-            SessionStore.load(this).pairings.firstOrNull { it.code == a.code },
+            saved,
             a.code, a.role, a.server, a.transport, a.fbConfig,
         )
-        connecting.value = !isFirebase && !preferencesOnly
+        connecting.value = !preferencesOnly
         uiError.value = null
         lifecycleScope.launch {
-            val status = if (isFirebase || preferencesOnly) {
-                // Firebase transport has no server to pre-check; the relay
-                // verifies the config on connect (anonymous auth — no secret needed).
+            val status = if (preferencesOnly) {
                 JSONObject()
             } else {
                 withContext(Dispatchers.IO) {
                     runCatching {
                         val http = a.server.replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
                         val conn = URL("$http/pair/${a.code}/status").openConnection() as HttpURLConnection
+                        SessionStore.load(this@MainActivity).pairings.firstOrNull { existing ->
+                            retainedDeviceToken(existing, a.code, a.role, a.server, a.transport, a.fbConfig) != null
+                        }?.let { conn.pairingAuth(it) }
                         conn.connectTimeout = 5000
                         conn.readTimeout = 5000
                         if (conn.responseCode == 200) JSONObject(conn.inputStream.bufferedReader().readText()) else null
@@ -507,13 +598,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
             connecting.value = false
-            if (!isFirebase && status == null) {
+            if (status == null) {
                 uiError.value = getString(R.string.error_server_unreachable, a.server)
                 return@launch
             }
             val cur = SessionStore.load(this@MainActivity)
             // Never forward a saved credential to another relay authority/role.
             val existing = cur.pairings.firstOrNull { it.code == a.code }
+            if (existing?.isFirebase == true) {
+                uiError.value = getString(R.string.setup_legacy_firebase_migration)
+                return@launch
+            }
             val newPairing = if (preferencesOnly && existing != null) existing.copy(
                 label = a.label,
                 liveCallEnabled = liveCallEnabledFor(a.role, a.liveCallEnabled),
@@ -523,6 +618,7 @@ class MainActivity : ComponentActivity() {
                 server = a.server,
                 transport = a.transport,
                 fbConfig = a.fbConfig,
+                deviceId = retainedDeviceId(existing, a.code, a.role, a.server, a.transport, a.fbConfig),
                 deviceToken = retainedDeviceToken(existing, a.code, a.role, a.server, a.transport, a.fbConfig),
                 label = a.label,
                 enabled = existing?.enabled ?: true,
@@ -547,6 +643,68 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun upsertSecurePairing(a: UiAction.UpsertPairing) {
+        if (!Config.allowsServer(a.server)) {
+            uiError.value = "Staging app only connects to ${Config.DEFAULT_SERVER}"
+            return
+        }
+        if (!SecureInviteText.validServer(a.server.trim().trimEnd('/'))) {
+            uiError.value = getString(R.string.setup_invite_invalid_server)
+            return
+        }
+        if (a.setupMode == PairingSetupMode.JOIN &&
+            SessionStore.load(this).pairings.any { it.code == a.code }) {
+            uiError.value = getString(R.string.setup_invite_existing_code)
+            return
+        }
+        connecting.value = true
+        uiError.value = null
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    when (a.setupMode) {
+                        PairingSetupMode.CREATE -> SecurePairingClient.create(a.server, a.role)
+                        PairingSetupMode.JOIN -> SecurePairingClient.join(a.server, a.code, a.role,
+                            requireNotNull(a.inviteSecret))
+                        PairingSetupMode.EDIT -> error("Invalid setup mode")
+                    }
+                }
+            }
+            connecting.value = false
+            val grant = result.getOrElse {
+                uiError.value = it.message ?: getString(R.string.setup_invite_failed)
+                return@launch
+            }
+            val cur = SessionStore.load(this@MainActivity)
+            if (cur.pairings.any { it.code == grant.code }) {
+                uiError.value = getString(R.string.setup_invite_existing_code)
+                return@launch
+            }
+            val newPairing = PairingInfo(
+                code = grant.code,
+                role = a.role,
+                server = a.server,
+                transport = a.transport,
+                deviceId = grant.deviceId,
+                deviceToken = grant.deviceToken,
+                ownsPairing = a.setupMode == PairingSetupMode.CREATE,
+                label = a.label,
+                liveCallEnabled = liveCallEnabledFor(a.role, a.liveCallEnabled),
+            )
+            val updated = cur.copy(pairings = cur.pairings + newPairing)
+            SessionStore.save(this@MainActivity, updated)
+            refreshSession()
+            refreshPermissionState()
+            if (updated.relayEnabled && permGateMissing.value.isEmpty()) restartRelay(updated.pairings)
+            goHome()
+            if (a.setupMode == PairingSetupMode.CREATE) {
+                pendingInvite.value = SecureInviteText.encode(a.server, grant.code,
+                    requireNotNull(grant.inviteRole), requireNotNull(grant.inviteSecret))
+                inviteCopied.value = false
+            }
+        }
+    }
+
     private fun restartRelay(pairings: List<PairingInfo>) {
         if (pairings.isNotEmpty()) {
             // Reconfigure the current instance atomically. Stop-then-start
@@ -556,28 +714,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun generateCode(
-        server: String,
-        onResult: (code: String?, failure: String?) -> Unit,
-    ) {
-        lifecycleScope.launch {
-            val code = withContext(Dispatchers.IO) {
-                runCatching {
-                    val http = server.replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
-                    val conn = URL("$http/pair/create").openConnection() as HttpURLConnection
-                    conn.requestMethod = "POST"
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 5000
-                    if (conn.responseCode == 200) {
-                        JSONObject(conn.inputStream.bufferedReader().readText()).optString("code")
-                    } else null
-                }.getOrNull()
-            }
-            if (!code.isNullOrBlank()) onResult(code, null) else onResult(null, getString(R.string.error_server_unreachable, server))
-        }
-    }
-
     private fun requiredPerms(): List<MissingPerm> {
+        // Staging variants can pair and exercise the relay before any cellular
+        // permission is granted. Their test permissions are granted separately.
+        if (Config.IS_STAGING_BUILD) return emptyList()
         val enabledRoles = SessionStore.load(this).pairings
             .asSequence()
             .filter { it.enabled }
@@ -764,6 +904,8 @@ sealed interface UiAction {
         val transport: String?,
         val fbConfig: String?,
         val liveCallEnabled: Boolean,
+        val setupMode: PairingSetupMode,
+        val inviteSecret: String?,
     ) : UiAction
     data object StartService : UiAction
     data object StopService : UiAction

@@ -8,6 +8,15 @@ import org.junit.Test
 
 class MessageStoreTest {
     @Test
+    fun expiredMessageContentIsRemovedOnFirstLoad() {
+        val prefs = FakeSharedPreferences()
+        MessageStore(prefs).append(entry(10, "IN", "SMS from Alice: expired"))
+        MessageStore(prefs).append(entry(95, "IN", "SMS from Bob: recent"))
+        val retained = MessageStore(prefs, retentionMs = 30, now = { 100 }).load()
+        assertEquals(listOf("SMS from Bob: recent"), retained.map { it.message })
+        assertEquals(retained, MessageStore(prefs).load())
+    }
+    @Test
     fun failedDiskWriteCannotBeMistakenForDurableReplay() {
         val prefs = FakeSharedPreferences().apply { failCommits = true }
         val store = MessageStore(prefs)

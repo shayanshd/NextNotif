@@ -1,4 +1,4 @@
-// Pure security transitions. Not wired into relay routes yet.
+// Pure security transitions used by the secure relay routes.
 // The storage caller must atomically persist a transition before releasing its
 // grant; crypto awaits alone do not serialize competing invite consumption.
 export const SECURE_MODE = 'invite_v1';

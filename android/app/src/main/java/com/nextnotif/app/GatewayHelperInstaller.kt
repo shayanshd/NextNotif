@@ -65,8 +65,8 @@ internal object GatewayHelperInstaller {
                     )
                 }
                 val output = process.inputStream.bufferedReader().readText().trim()
-                if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
-                    process.destroyForcibly()
+                if (!CompatProcess.waitFor(process, 10_000)) {
+                    CompatProcess.destroy(process)
                     return@withContext GatewayHelperInstallResult(
                         GatewayHelperInstallStatus.INSTALL_FAILED,
                         target = target,

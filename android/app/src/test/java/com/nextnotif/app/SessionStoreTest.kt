@@ -97,7 +97,7 @@ class SessionStoreTest {
             code = "111111",
             server = "ws://a:8000",
             pairings = listOf(
-                PairingInfo(code = "111111", role = Role.SENDER, server = "ws://a:8000", deviceToken = "tok-a", label = "Wife's phone"),
+                PairingInfo(code = "111111", role = Role.SENDER, server = "ws://a:8000", deviceId = "id-a", deviceToken = "tok-a", ownsPairing = true, label = "Wife's phone"),
                 PairingInfo(
                     code = "222222",
                     role = Role.RECEIVER,
@@ -113,6 +113,8 @@ class SessionStoreTest {
         assertEquals("111111", loaded.pairings[0].code)
         assertEquals(Role.SENDER, loaded.pairings[0].role)
         assertEquals("tok-a", loaded.pairings[0].deviceToken)
+        assertTrue(loaded.pairings[0].ownsPairing)
+        assertEquals("id-a", loaded.pairings[0].deviceId)
         assertEquals("Wife's phone", loaded.pairings[0].label)
         assertEquals("Wife's phone", loaded.pairings[0].displayName)
         assertEquals(false, loaded.pairings[0].liveCallEnabled)

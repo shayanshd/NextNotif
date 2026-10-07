@@ -36,7 +36,7 @@ internal object SmsRelay {
         val base = pairing.server.trimEnd('/').replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
         val request = Request.Builder().url("$base/$path").header("X-NextNotif-Code", pairing.code)
             .header("X-NextNotif-Role", pairing.role.name.lowercase())
-            .apply { pairing.deviceToken?.let { header("X-NextNotif-Token", it) } }
+            .pairingAuth(pairing)
             .post(data.toString().toRequestBody(json)).build()
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw SmsHttpError(response.code)

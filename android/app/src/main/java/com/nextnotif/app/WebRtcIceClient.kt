@@ -20,6 +20,7 @@ internal object WebRtcIceClient {
         val token = checkNotNull(pairing.deviceToken) { "Pairing authentication is missing" }
         val request = Request.Builder().url("$base/ice")
             .header("X-NextNotif-Code", pairing.code).header("Authorization", "Bearer $token")
+            .pairingAuth(pairing)
             .post("".toRequestBody("application/json".toMediaType())).build()
         return client.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "TURN credential request failed (HTTP ${response.code})" }

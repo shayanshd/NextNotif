@@ -33,7 +33,7 @@ object PermissionPolicy {
 
     /** Live-call permissions are an enhancement and must never enter the baseline gate. */
     fun needsLiveCallPermissions(pairings: List<PairingInfo>): Boolean =
-        pairings.any {
+        Config.LIVE_CALL_BETA_ENABLED && pairings.any {
             it.enabled &&
                 it.role == Role.SENDER &&
                 it.liveCallEnabled

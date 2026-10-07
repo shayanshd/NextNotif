@@ -1,14 +1,16 @@
-import { submitSms, updateSms, expireSms, simOptions } from './sms-mailbox.mjs';
-import { submitCall, updateCall, expireCalls, cancelActiveCalls } from './call-mailbox.mjs';
+import { submitSms, updateSms, expireSms, simOptions, SMS_RETENTION_MS } from './sms-mailbox.mjs';
+import { submitCall, updateCall, expireCalls, cancelActiveCalls, CALL_RETENTION_MS } from './call-mailbox.mjs';
 import { DurableObject } from 'cloudflare:workers';
 import { cloudflareIceServers, consumeIceBudget } from './turn-credentials.mjs';
 import { SecurePairingStore } from './secure-pairing-store.mjs';
 import { authorizeSecure, AuthorizationError } from './secure-pairing.mjs';
+import { randomPairingCode, readRelayBody, RelayBodyTooLarge } from './relay-input.mjs';
+import { appendQueued, nextQueueExpiry, pruneQueue } from './relay-queue.mjs';
+import { consumePairingBudget, CREATE_ATTEMPTS_PER_MINUTE, JOIN_CLIENT_ATTEMPTS_PER_MINUTE, PairingRateLimitError } from './pairing-rate-limit.mjs';
 
 const CODE_RE = /^\d{6}$/;
 const AUTH_TIMEOUT_MS = 5000;
 const MAX_DEVICE_TOKENS = 4;
-const MAX_QUEUED = 50;
 const MAX_ACK_EVENT_IDS = 100;
 const FCM_DURABLE_TYPES = new Set(['sms', 'call', 'relay_test']);
 // One wake per pairing/role per window: events pile up in the queue meanwhile,
@@ -33,6 +35,15 @@ function isValidFcmToken(v) {
   );
 }
 
+async function publicPairingBudget(env, request, action) {
+  // Cloudflare supplies this header on direct client requests. The fallback
+  // is one shared bucket when local tests or a proxy omit it.
+  const source = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const clientKey = /^[0-9a-fA-F:.]{1,45}$/.test(source) ? source : 'unknown';
+  const limiter = env.PAIRING.get(env.PAIRING.idFromName(`secure-${action}-budget:${clientKey}`));
+  return limiter.fetch(new Request(`https://internal.invalid/__secure-${action}-budget`, { method: 'POST' }));
+}
+
 // Forward a request (WS upgrade or otherwise) to the pairing's DO instance.
 // The DO only understands the path form /ws/<role>/<code>, so normalize the
 // header-form /ws/<role> URL onto it before forwarding.
@@ -51,7 +62,12 @@ async function forwardToPairing(env, request, code, role) {
 async function forwardSend(env, request, code) {
   const url = new URL(request.url);
   url.pathname = `/send/${code}`;
-  const body = await request.text();
+  let body;
+  try { body = await readRelayBody(request); }
+  catch (error) {
+    if (error instanceof RelayBodyTooLarge) return Response.json({ error: 'body too large' }, { status: 413 });
+    throw error;
+  }
   const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
   const fwd = new Request(url, { method: request.method, headers: request.headers, body });
   return inst.fetch(fwd);
@@ -63,7 +79,12 @@ async function forwardReceiverHttp(env, request, code, operation) {
   const url = new URL(request.url);
   url.pathname = `/${operation}/${code}`;
   // ICE requests carry no body: never buffer arbitrary unauthenticated input.
-  const body = operation === 'ice' ? '' : await request.text();
+  let body;
+  try { body = operation === 'ice' ? '' : await readRelayBody(request); }
+  catch (error) {
+    if (error instanceof RelayBodyTooLarge) return Response.json({ error: 'body too large' }, { status: 413 });
+    throw error;
+  }
   const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
   return inst.fetch(new Request(url, { method: 'POST', headers: request.headers, body }));
 }
@@ -240,15 +261,74 @@ export class RelayPairing extends DurableObject {
 
   async getQueue() {
     const raw = await this.state.storage.get('queue');
-    try {
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
+    if (raw == null) return [];
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch { parsed = null; }
+    const result = pruneQueue(parsed);
+    if (result.invalid || result.expired > 0) await this.putQueue(result.queue);
+    else await this.rescheduleMaintenance();
+    return result.queue;
+  }
+
+  async rescheduleMaintenance() {
+    const now = Date.now();
+    let queue;
+    try { queue = JSON.parse((await this.state.storage.get('queue')) || '[]'); }
+    catch { queue = []; }
+    const deadlines = [];
+    if (Array.isArray(queue) && queue.length) {
+      const valid = pruneQueue(queue, now).queue;
+      // An old or malformed queue needs an alarm to remove its stored content.
+      deadlines.push(valid.length === queue.length ? nextQueueExpiry(valid) : now + 1);
     }
+    for (const [key, retention] of [['smsCommands', SMS_RETENTION_MS], ['callCommands', CALL_RETENTION_MS]]) {
+      const records = await this.state.storage.get(key);
+      if (!Array.isArray(records) || records.length === 0) continue;
+      let oldest = Infinity;
+      for (const item of records) {
+        const deadline = Number.isSafeInteger(item?.created_at) ? item.created_at + retention : now + 1;
+        oldest = Math.min(oldest, deadline);
+      }
+      deadlines.push(Math.max(oldest, now + 1));
+    }
+    const budget = await this.state.storage.get('publicPairingBudget');
+    if (budget?.resetAt > now) deadlines.push(budget.resetAt);
+    const next = deadlines.length ? Math.min(...deadlines) : null;
+    const scheduled = await this.state.storage.getAlarm();
+    if (next == null) {
+      if (scheduled != null) await this.state.storage.deleteAlarm();
+    } else if (scheduled !== next) await this.state.storage.setAlarm(next);
   }
 
   async putQueue(queue) {
-    await this.state.storage.put('queue', JSON.stringify(queue));
+    if (queue.length === 0) {
+      await this.state.storage.delete('queue');
+    } else await this.state.storage.put('queue', JSON.stringify(queue));
+    await this.rescheduleMaintenance();
+  }
+
+  async putCommandRecords(key, records) {
+    await this.state.storage.put(key, records);
+    await this.rescheduleMaintenance();
+  }
+
+  async recordQueueOverflow(count) {
+    if (count <= 0) return;
+    const prior = await this.state.storage.get('overflowDroppedTotal');
+    await this.state.storage.put('overflowDroppedTotal',
+      (Number.isSafeInteger(prior) && prior >= 0 ? prior : 0) + count);
+  }
+
+  async alarm() {
+    await this.getQueue();
+    for (const [key, expire] of [['smsCommands', expireSms], ['callCommands', expireCalls]]) {
+      const records = await this.state.storage.get(key);
+      if (Array.isArray(records) && records.length) await this.state.storage.put(key, expire(records));
+    }
+    const budget = await this.state.storage.get('publicPairingBudget');
+    if (budget?.resetAt <= Date.now()) await this.state.storage.delete('publicPairingBudget');
+    await this.rescheduleMaintenance();
   }
 
   async getDeliveryModes() {
@@ -381,13 +461,22 @@ export class RelayPairing extends DurableObject {
         }),
       });
       if (!resp.ok) {
-        console.warn(`FCM wake failed: ${resp.status} ${(await resp.text()).slice(0, 200)}`);
+        const failure = await resp.json().catch(() => null);
+        const status = failure?.error?.status;
+        const category = typeof status === 'string' && /^[A-Z_]{3,40}$/.test(status)
+          ? status : 'UNKNOWN';
+        const message = typeof failure?.error?.message === 'string' ? failure.error.message : '';
+        const cause = message.includes('cloudmessaging.messages.create') ? 'missing-send-permission'
+          : message.includes('API has not been used') || message.includes('API is disabled') ? 'api-disabled'
+            : 'unspecified';
+        console.warn(`FCM wake rejected: HTTP ${resp.status} ${category} ${cause}`);
         return;
       }
       await this.setLastWake(role, now);
-      console.log(`FCM wake sent for ${this.code}/${role}`);
+      console.log('FCM wake sent');
     } catch (e) {
-      console.warn(`FCM wake for ${this.code}/${role} failed:`, e);
+      const type = e instanceof Error ? e.name : 'unknown';
+      console.warn(`FCM wake failed: ${type}`);
     }
   }
 
@@ -397,31 +486,33 @@ export class RelayPairing extends DurableObject {
     await Promise.race([this.maybeFcmWake('receiver', evt), new Promise((r) => setTimeout(r, 5000))]);
   }
 
-  // Sender uplink (POST /send): hand the event straight to the receiver's open
-  // socket, or hold it in the per-pairing queue for the receiver's next
-  // (re)connect. DO methods never interleave, so the live/queue decision and
-  // the queue mutation are consistent with each other.
+  // Sender uplink (POST /send): updated WebSocket receivers get an immediate
+  // copy while the durable copy stays queued until fetch/ack. Older sockets
+  // retain their existing direct/replay behavior during migration.
   async deliverToReceiver(type, data) {
     const eventId = randomToken();
     const out = JSON.stringify({ type, from: 'sender', event_id: eventId, data: data ?? null });
     const useFcmQueue = FCM_DURABLE_TYPES.has(type) &&
       (await this.getDeliveryModes()).receiver === 'fcm';
+    const useWsQueue = FCM_DURABLE_TYPES.has(type) &&
+      (await this.state.storage.get('receiverQueueSync')) === true;
     const sockets = this.liveSockets();
     const receiver = sockets.receiver;
-    if (receiver && receiver.readyState === WebSocket.OPEN && !useFcmQueue) {
+    if (receiver && receiver.readyState === WebSocket.OPEN && !useFcmQueue && !useWsQueue) {
       receiver.send(out);
-      return { delivered: true, queued: 0 };
+      return { delivered: true, queued: 0, overflow_dropped: 0 };
     }
-    const queue = await this.getQueue();
-    queue.push({ ts: Date.now(), event_id: eventId, out });
-    while (queue.length > MAX_QUEUED) queue.shift();
+    const { queue, overflow } = appendQueued(await this.getQueue(), { ts: Date.now(), event_id: eventId, out });
     await this.putQueue(queue);
-    await this.wakeWithTimeout({ type, event_id: eventId, data: data ?? null });
-    return { delivered: false, queued: queue.length };
+    await this.recordQueueOverflow(overflow);
+    if (overflow > 0) console.warn(`Relay queue overflow dropped ${overflow} event(s)`);
+    const delivered = receiver?.readyState === WebSocket.OPEN && !useFcmQueue;
+    if (delivered) receiver.send(out);
+    else await this.wakeWithTimeout({ type, event_id: eventId, data: data ?? null });
+    return { delivered, queued: queue.length, overflow_dropped: overflow };
   }
 
-  // Replay everything queued while the receiver was offline. Called right
-  // after the receiver authenticates, so the socket is provably open.
+  // Legacy-only destructive replay. Updated receivers use fetch/ack instead.
   async flushQueue(ws) {
     const queue = await this.getQueue();
     if (queue.length === 0) return;
@@ -466,12 +557,87 @@ export class RelayPairing extends DurableObject {
     const callOperation = ['call-submit', 'call-fetch', 'call-result', 'call-status', 'call-cancel'].includes(operation);
     const requestedRole = request.headers.get('X-NextNotif-Role') || 'receiver';
     if (!['sender', 'receiver'].includes(requestedRole)) return Response.json({error: 'invalid role'}, {status: 400});
+    // Only the top-level Worker forwards this route; no public path maps to it.
+    if (['__secure-create-budget', '__secure-join-budget'].includes(operation) &&
+        request.method === 'POST' && parts.length === 1) {
+      try {
+        const limit = operation === '__secure-create-budget' ? CREATE_ATTEMPTS_PER_MINUTE : JOIN_CLIENT_ATTEMPTS_PER_MINUTE;
+        const resetAt = await consumePairingBudget(this.state.storage, 'publicPairingBudget', limit);
+        const scheduled = await this.state.storage.getAlarm();
+        if (scheduled == null || resetAt < scheduled) await this.state.storage.setAlarm(resetAt);
+        return Response.json({ allowed: true });
+      } catch (error) {
+        if (error instanceof PairingRateLimitError) return Response.json({ error: 'pairing rate limited' }, {
+          status: 429, headers: { 'Retry-After': String(error.retryAfterSeconds), 'Cache-Control': 'no-store' },
+        });
+        throw error;
+      }
+    }
+    if (operation === 'pair-secure-create' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
+      let body;
+      try { body = await request.json(); }
+      catch { return Response.json({ error: 'invalid body' }, { status: 400 }); }
+      if (!body || !['sender', 'receiver'].includes(body.role))
+        return Response.json({ error: 'invalid role' }, { status: 400 });
+      try {
+        const grant = await new SecurePairingStore(this.state.storage).create(body.role, Math.floor(Date.now() / 1000));
+        this.code = parts[1];
+        return Response.json({
+          code: parts[1],
+          device_id: grant.device.device_id,
+          device_token: grant.device.device_token,
+          invite: { role: grant.invite.role, secret: grant.invite.secret, expires_at: grant.invite.expires_at },
+        }, { headers: { 'Cache-Control': 'no-store' } });
+      } catch (error) {
+        if (error instanceof AuthorizationError) return Response.json({ error: 'code unavailable' }, { status: 409 });
+        return Response.json({ error: 'pairing storage unavailable' }, { status: 503 });
+      }
+    }
+    if (operation === 'pair-secure-join' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
+      let body;
+      try { body = await request.json(); }
+      catch { return Response.json({ error: 'invalid body' }, { status: 400 }); }
+      if (!body || typeof body.secret !== 'string' || !['sender', 'receiver'].includes(body.role))
+        return Response.json({ error: 'invalid body' }, { status: 400 });
+      try {
+        const grant = await new SecurePairingStore(this.state.storage).join(body.secret, body.role, Math.floor(Date.now() / 1000));
+        return Response.json({ device_id: grant.device.device_id, device_token: grant.device.device_token },
+          { headers: { 'Cache-Control': 'no-store' } });
+      } catch (error) {
+        if (error instanceof PairingRateLimitError) return Response.json({ error: 'pairing rate limited' }, {
+          status: 429, headers: { 'Retry-After': String(error.retryAfterSeconds), 'Cache-Control': 'no-store' },
+        });
+        if (error instanceof AuthorizationError) return Response.json({ error: 'pairing authorization failed' }, { status: 401 });
+        return Response.json({ error: 'pairing storage unavailable' }, { status: 503 });
+      }
+    }
+    if (operation === 'pair-secure-delete' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {
+      const ownerId = request.headers.get('X-NextNotif-Device-Id');
+      const token = request.headers.get('X-NextNotif-Token');
+      try {
+        const deleted = await new SecurePairingStore(this.state.storage).delete(ownerId, token);
+        await this.state.storage.deleteAlarm();
+        if (deleted) {
+          for (const socket of this.state.getWebSockets()) {
+            if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+              socket.close(1000, 'pairing deleted');
+          }
+          for (const role of ['sender', 'receiver']) this.clearAuthTimeout(role);
+          this.accepted = { sender: null, receiver: null };
+          this.code = null;
+        }
+        return Response.json({ deleted: true }, { headers: { 'Cache-Control': 'no-store' } });
+      } catch (error) {
+        if (error instanceof AuthorizationError)
+          return Response.json({ error: 'pairing authorization failed' }, { status: 401 });
+        return Response.json({ error: 'pairing deletion failed' }, { status: 503 });
+      }
+    }
     let secure = false;
     try {
       if (operation === 'ws') {
-        // Secure WS support follows HTTP guards. Until then deny before slot
-        // replacement, pending metadata, or legacy token minting can occur.
-        if (await this.securityMode() !== 'legacy') throw new AuthorizationError();
+        // Authenticate before accepting a socket or replacing a live holder.
+        secure = await this.authorizeHttp(request, parts[1]);
       } else if (smsOperation || callOperation || operation === 'battery-status' || operation === 'send' || ['fcm-register', 'drain', 'fetch', 'ack', 'status', 'ice'].includes(operation)) {
         secure = await this.authorizeHttp(request, operation === 'send' || operation === 'battery-status' || ['sms-fetch', 'sms-result', 'call-fetch', 'call-result'].includes(operation) ? 'sender' : operation === 'fcm-register' ? requestedRole : ['status', 'ice'].includes(operation) ? null : 'receiver');
       }
@@ -504,14 +670,14 @@ export class RelayPairing extends DurableObject {
       if (operation === 'sms-submit') {
         const result = submitSms(records, body);
         if (result.error) return Response.json({error: result.error}, {status: result.status});
-        await this.state.storage.put('smsCommands', result.records);
+        await this.putCommandRecords('smsCommands', result.records);
         this.signalSmsSync('sender');
         this.state.waitUntil(this.maybeFcmWake('sender', {type: 'sms_request'}));
         return Response.json({command: result.command});
       }
       if (operation === 'sms-result' && !updateSms(records, body))
         return Response.json({error: 'invalid result'}, {status: 400});
-      await this.state.storage.put('smsCommands', records);
+      await this.putCommandRecords('smsCommands', records);
       if (operation === 'sms-result') {
         this.signalSmsSync('receiver');
         this.state.waitUntil(this.maybeFcmWake('receiver', {type: 'sms_status'}));
@@ -546,7 +712,7 @@ export class RelayPairing extends DurableObject {
       if (operation === 'call-submit') {
         const result = submitCall(records, body);
         if (result.status !== 200) return Response.json({error: 'invalid or active call request'}, {status: result.status});
-        await this.state.storage.put('callCommands', result.records);
+        await this.putCommandRecords('callCommands', result.records);
         this.signalSmsSync('sender', 'call_sync');
         this.state.waitUntil(this.maybeFcmWake('sender', {type: 'call_request'}));
         return Response.json({command: result.command});
@@ -554,7 +720,7 @@ export class RelayPairing extends DurableObject {
       if (operation === 'call-result' && !updateCall(records, body))
         return Response.json({error: 'invalid result'}, {status: 400});
       if (operation === 'call-cancel') cancelActiveCalls(records, body?.reason || 'Receiver started a new call');
-      await this.state.storage.put('callCommands', records);
+      await this.putCommandRecords('callCommands', records);
       if (operation === 'call-result' || operation === 'call-cancel') {
         this.signalSmsSync('receiver', 'call_sync');
         this.state.waitUntil(this.maybeFcmWake('receiver', {type: 'call_status'}));
@@ -619,12 +785,13 @@ export class RelayPairing extends DurableObject {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.state.acceptWebSocket(client, [role]);
+      if (secure) client.serializeAttachment({ security_mode: 'invite_v1', device_id: request.headers.get('X-NextNotif-Device-Id'), role, authenticated: false });
       await this.state.storage.put('paired', '1');
       this.code = code;
       this.accepted[role] = client;
       const token = randomToken();
       const pending = await this.getPending();
-      pending[role] = { token, stage: 'hello' };
+      pending[role] = { token, stage: 'hello', secure };
       await this.putPending(pending);
       this.scheduleAuthTimeout(role);
       return new Response(null, { status: 101, webSocket: server });
@@ -714,6 +881,9 @@ export class RelayPairing extends DurableObject {
       if (!secure && (!presented || !tokens.includes(presented))) {
         return Response.json({ error: 'unknown device token' }, { status: 401 });
       }
+      if (secure && parts[0] === 'drain') {
+        return Response.json({ error: 'use fetch and ack' }, { status: 410 });
+      }
       if (parts[0] === 'ack') {
         let body = null;
         try {
@@ -749,7 +919,9 @@ export class RelayPairing extends DurableObject {
           return null;
         }
       }).filter(Boolean);
-      return Response.json({ events });
+      const overflowDroppedTotal = await this.state.storage.get('overflowDroppedTotal');
+      return Response.json({ events,
+        overflow_dropped_total: Number.isSafeInteger(overflowDroppedTotal) ? overflowDroppedTotal : 0 });
     }
 
     return new Response('Not found', { status: 404 });
@@ -758,6 +930,22 @@ export class RelayPairing extends DurableObject {
   async webSocketMessage(ws, message) {
     const role = this.roleOf(ws);
     if (!role) return;
+
+    const attachment = ws.deserializeAttachment();
+    if (!attachment && await this.securityMode() !== 'legacy') {
+      ws.close(1008, 'auth required');
+      return;
+    }
+    if (attachment?.security_mode === 'invite_v1') {
+      try {
+        const record = await new SecurePairingStore(this.state.storage).read();
+        const credential = record.credentials[attachment.device_id];
+        if (attachment.role !== role || !credential || credential.revoked || credential.role !== role) throw new AuthorizationError();
+      } catch {
+        ws.close(1008, 'credential revoked');
+        return;
+      }
+    }
 
     let msg = null;
     try {
@@ -814,6 +1002,24 @@ export class RelayPairing extends DurableObject {
         ws.close(1008, 'auth failed');
         return;
       }
+      if (entry.secure) {
+        if (attachment?.security_mode !== 'invite_v1') {
+          ws.close(1008, 'auth failed');
+          return;
+        }
+        ws.serializeAttachment({ ...attachment, authenticated: true });
+        await this.storeFcmToken(role, msg.fcm_token);
+        ws.send(JSON.stringify({ type: 'auth_ok' }));
+        if (role === 'receiver') {
+          const mode = msg.delivery_mode === 'fcm' ? 'fcm' : 'ws';
+          await this.setDeliveryMode('receiver', mode);
+          const queueSync = mode === 'ws' && msg.queue_sync === true;
+          await this.state.storage.put('receiverQueueSync', queueSync);
+          if (queueSync) ws.send(JSON.stringify({ type: 'queue_ready', data: {} }));
+          else if (mode === 'ws') await this.flushQueue(ws);
+        }
+        return;
+      }
       // The auth message may carry a fresher FCM wake token than hello did.
       await this.storeFcmToken(role, msg.fcm_token);
       // Device tokens: a presented token that belongs to this pairing is kept;
@@ -834,11 +1040,19 @@ export class RelayPairing extends DurableObject {
         // Keep its durable backlog for authenticated fetch/ack, not WS replay.
         const mode = msg.delivery_mode === 'fcm' ? 'fcm' : 'ws';
         await this.setDeliveryMode('receiver', mode);
+        const queueSync = mode === 'ws' && msg.queue_sync === true;
+        await this.state.storage.put('receiverQueueSync', queueSync);
         // Catch-up: events the sender uplinked while this receiver was
         // offline arrive now, in order, before any live relay.
-        if (mode === 'ws') await this.flushQueue(ws);
+        if (queueSync) ws.send(JSON.stringify({ type: 'queue_ready', data: {} }));
+        else if (mode === 'ws') await this.flushQueue(ws);
       }
       return; // authenticated: never relayed
+    }
+
+    if (attachment?.security_mode === 'invite_v1' && !attachment.authenticated) {
+      ws.close(1008, 'auth required');
+      return;
     }
 
     // ArrayBuffer frames are live call PCM. They are intentionally sent only
@@ -869,8 +1083,9 @@ export class RelayPairing extends DurableObject {
       return;
     }
 
-    const useFcmQueue = role === 'sender' && FCM_DURABLE_TYPES.has(msg.type) &&
-      (await this.getDeliveryModes()).receiver === 'fcm';
+    const durable = role === 'sender' && FCM_DURABLE_TYPES.has(msg.type);
+    const useFcmQueue = durable && (await this.getDeliveryModes()).receiver === 'fcm';
+    const useWsQueue = durable && (await this.state.storage.get('receiverQueueSync')) === true;
     const sockets = this.liveSockets();
     const target = role === 'sender' ? sockets.receiver : sockets.sender;
     const eventId = randomToken();
@@ -880,22 +1095,26 @@ export class RelayPairing extends DurableObject {
       event_id: eventId,
       data: msg.data,
     });
-    if (target && target.readyState === WebSocket.OPEN && !useFcmQueue) {
+    if (target && target.readyState === WebSocket.OPEN && !useFcmQueue && !useWsQueue) {
       target.send(out);
       return;
     }
     if (role === 'sender' && msg.type !== 'call_control') {
       // Receiver offline: hold the event for catch-up and wake the phone
       // (the WS path used to drop it silently).
-      const queue = await this.getQueue();
-      queue.push({ ts: Date.now(), event_id: eventId, out });
-      while (queue.length > MAX_QUEUED) queue.shift();
+      const { queue, overflow } = appendQueued(await this.getQueue(), { ts: Date.now(), event_id: eventId, out });
       await this.putQueue(queue);
-      await this.wakeWithTimeout({
-        type: msg.type || 'unknown',
-        event_id: eventId,
-        data: msg.data ?? null,
-      });
+      await this.recordQueueOverflow(overflow);
+      if (overflow > 0) console.warn(`Relay queue overflow dropped ${overflow} event(s)`);
+      if (overflow > 0) {
+        const sender = sockets.sender;
+        if (sender?.readyState === WebSocket.OPEN)
+          sender.send(JSON.stringify({ type: 'queue_overflow', data: { dropped: overflow } }));
+      }
+      if (target?.readyState === WebSocket.OPEN && !useFcmQueue) target.send(out);
+      else await this.wakeWithTimeout({
+          type: msg.type || 'unknown', event_id: eventId, data: msg.data ?? null,
+        });
     }
   }
 
@@ -951,9 +1170,48 @@ export default {
       });
     }
 
+    if (parts.length === 2 && parts[0] === 'pair' && parts[1] === 'secure-create' && request.method === 'POST') {
+      const budget = await publicPairingBudget(env, request, 'create');
+      if (!budget.ok) return budget;
+      let body;
+      try { body = await readRelayBody(request); }
+      catch (error) {
+        if (error instanceof RelayBodyTooLarge) return Response.json({ error: 'body too large' }, { status: 413 });
+        throw error;
+      }
+      let parsed;
+      try { parsed = JSON.parse(body); }
+      catch { return Response.json({ error: 'invalid body' }, { status: 400 }); }
+      if (!parsed || !['sender', 'receiver'].includes(parsed.role))
+        return Response.json({ error: 'invalid role' }, { status: 400 });
+      for (let i = 0; i < 20; i++) {
+        const code = randomPairingCode();
+        const forwarded = new URL(request.url);
+        forwarded.pathname = `/pair-secure-create/${code}`;
+        const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
+        const result = await inst.fetch(new Request(forwarded, { method: 'POST', headers: request.headers, body }));
+        if (result.status !== 409) return result;
+      }
+      return Response.json({ error: 'could not allocate a code' }, { status: 503 });
+    }
+
+    if (parts.length === 2 && parts[0] === 'pair' && parts[1] === 'secure-join' && request.method === 'POST') {
+      const code = request.headers.get('X-NextNotif-Code');
+      if (!isValidCode(code)) return Response.json({ error: 'missing pairing code' }, { status: 400 });
+      const budget = await publicPairingBudget(env, request, 'join');
+      if (!budget.ok) return budget;
+      return forwardReceiverHttp(env, request, code, 'pair-secure-join');
+    }
+
+    if (parts.length === 2 && parts[0] === 'pair' && parts[1] === 'secure-delete' && request.method === 'POST') {
+      const code = request.headers.get('X-NextNotif-Code');
+      if (!isValidCode(code)) return Response.json({ error: 'missing pairing code' }, { status: 400 });
+      return forwardReceiverHttp(env, request, code, 'pair-secure-delete');
+    }
+
     if (parts.length === 2 && parts[0] === 'pair' && parts[1] === 'create' && request.method === 'POST') {
       for (let i = 0; i < 20; i++) {
-        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const code = randomPairingCode();
         const inst = env.PAIRING.get(env.PAIRING.idFromName(code));
         if (await inst.tryClaim()) {
           return Response.json({ code });

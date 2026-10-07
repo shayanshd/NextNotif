@@ -4,21 +4,49 @@ plugins {
     id("com.google.gms.google-services")
 }
 
+val privateSigningValues = listOf(
+    "NEXTNOTIF_SIGNING_STORE_FILE",
+    "NEXTNOTIF_SIGNING_STORE_PASSWORD",
+    "NEXTNOTIF_SIGNING_KEY_ALIAS",
+    "NEXTNOTIF_SIGNING_KEY_PASSWORD",
+).associateWith { providers.environmentVariable(it).orNull }
+val privateSigningConfigured = privateSigningValues.values.all { !it.isNullOrBlank() }
+if (privateSigningValues.values.any { !it.isNullOrBlank() } && !privateSigningConfigured) {
+    error("Private release signing requires all four NEXTNOTIF_SIGNING_* environment variables")
+}
+val compatibilityTestMinSdk = providers.gradleProperty("nextnotifCompatibilityTestMinSdk").orNull
+if (compatibilityTestMinSdk != null && compatibilityTestMinSdk != "25") {
+    error("The compatibility test override supports only API 25")
+}
+
 android {
     namespace = "com.nextnotif.app"
     compileSdk = 34
 
     defaultConfig {
         applicationId = "com.nextnotif.app"
-        minSdk = 25
+        // API 25 is an explicit device-test override, never the private release default.
+        minSdk = if (compatibilityTestMinSdk == "25") 25 else 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0-private-mvp"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (privateSigningConfigured) {
+            create("privateRelease") {
+                storeFile = file(privateSigningValues.getValue("NEXTNOTIF_SIGNING_STORE_FILE")!!)
+                storePassword = privateSigningValues.getValue("NEXTNOTIF_SIGNING_STORE_PASSWORD")
+                keyAlias = privateSigningValues.getValue("NEXTNOTIF_SIGNING_KEY_ALIAS")
+                keyPassword = privateSigningValues.getValue("NEXTNOTIF_SIGNING_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
+            if (privateSigningConfigured) signingConfig = signingConfigs.getByName("privateRelease")
             // Keep the WebRTC audio bridge unminified. Older Samsung Android
             // builds abort inside the native audio thread when R8 rewrites
             // the JavaAudioDeviceModule integration.
@@ -30,6 +58,55 @@ android {
         }
         debug {
             isDebuggable = true
+        }
+        create("compat") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".compat"
+            versionNameSuffix = "-compat"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "app_name", "NextNotif Compat")
+        }
+        create("staging") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging"
+            versionNameSuffix = "-staging"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "app_name", "NextNotif Staging")
+        }
+        create("stagingFcm") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging.fcm"
+            versionNameSuffix = "-staging-fcm"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "app_name", "NextNotif FCM Test")
+        }
+        create("stagingSms") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging.sms"
+            versionNameSuffix = "-staging-sms"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "app_name", "NextNotif SMS Test")
+        }
+        create("stagingInbound") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging.inbound"
+            versionNameSuffix = "-staging-inbound"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "app_name", "NextNotif Inbound Test")
+        }
+        create("stagingCall") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging.call"
+            versionNameSuffix = "-staging-call"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "app_name", "NextNotif Call Test")
+        }
+        create("stagingCallReceiver") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging.call.receiver"
+            versionNameSuffix = "-staging-call-receiver"
+            matchingFallbacks += listOf("debug")
+            resValue("string", "app_name", "NextNotif Call Receiver")
         }
     }
 
@@ -82,8 +159,6 @@ dependencies {
     // media migration is separate from FCM wake/HTTPS message delivery.
     implementation("io.getstream:stream-video-webrtc-android:145.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("com.google.firebase:firebase-auth-ktx:23.1.0")
-    implementation("com.google.firebase:firebase-database-ktx:21.0.0")
     // Last pre-Kotlin-2 Firebase Messaging line; upgrading further requires a
     // coordinated Kotlin/Compose/AGP migration rather than a transport change.
     implementation("com.google.firebase:firebase-messaging:24.1.2")

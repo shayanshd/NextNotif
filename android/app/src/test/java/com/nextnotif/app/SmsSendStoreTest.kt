@@ -1,10 +1,41 @@
 package com.nextnotif.app
 
+import android.app.Activity
+import android.telephony.SmsManager
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
 class SmsSendStoreTest {
+    @Test fun clearHistoryScrubsFinishedAndUncertainContentButPreservesPendingDelivery() {
+        val store = SmsSendStore(FakeSharedPreferences())
+        val sent = command().put("status", "sent")
+        val unknown = command().put("id", java.util.UUID.randomUUID().toString()).put("status", "unknown")
+        val pending = command().put("id", java.util.UUID.randomUUID().toString()).put("status", "pending")
+        listOf(sent, unknown, pending).forEach(store::put)
+        store.hideHistory()
+        listOf(sent, unknown).forEach {
+            val saved = store.get(it.getString("id"))!!
+            assertFalse(saved.has("to"))
+            assertFalse(saved.has("body"))
+            assertTrue(saved.optBoolean("hidden"))
+        }
+        assertEquals(pending.getString("body"), store.get(pending.getString("id"))!!.getString("body"))
+        store.mergeStatus(pending.getString("id"), JSONObject().put("status", "sent"))
+        val completed = store.get(pending.getString("id"))!!
+        assertFalse(completed.has("to"))
+        assertFalse(completed.has("body"))
+    }
+    @Test fun oldFinishedRequestLosesPayloadButKeepsDeduplicationId() {
+        val prefs = FakeSharedPreferences()
+        val old = command().put("status", "sent")
+        prefs.edit().putString("records", org.json.JSONArray().put(old).toString()).commit()
+        val saved = SmsSendStore(prefs).all().single()
+        assertFalse(saved.has("to"))
+        assertFalse(saved.has("body"))
+        assertEquals(old.getString("id"), saved.getString("id"))
+        assertFalse(SmsSendStore(prefs).get(old.getString("id"))!!.has("body"))
+    }
     private fun command() = JSONObject().put("id", "00000000-0000-4000-8000-000000000001")
         .put("to", "+15551234567").put("body", "Hello").put("created_at", 1_000_000L).put("parts", 2)
 
@@ -50,9 +81,9 @@ class SmsSendStoreTest {
         val data = command()
         val id = data.getString("id")
         store.claim(data)
-        assertEquals("sending", store.partResult(id, 0, 2, true)!!.getString("status"))
-        assertEquals("sending", store.partResult(id, 0, 2, true)!!.getString("status"))
-        assertEquals("sent", store.partResult(id, 1, 2, true)!!.getString("status"))
+        assertEquals("sending", store.partResult(id, 0, 2, Activity.RESULT_OK)!!.getString("status"))
+        assertEquals("sending", store.partResult(id, 0, 2, Activity.RESULT_OK)!!.getString("status"))
+        assertEquals("sent", store.partResult(id, 1, 2, Activity.RESULT_OK)!!.getString("status"))
     }
     @Test fun failedDurableClaimNeverReturnsPermissionToSend() {
         val prefs = FakeSharedPreferences().apply { failCommits = true }
@@ -67,8 +98,8 @@ class SmsSendStoreTest {
         store.claim(command())
         store.hideHistory()
         assertFalse(store.claim(command()))
-        store.partResult(id, 0, 2, true)
-        val result = store.partResult(id, 1, 2, true)!!
+        store.partResult(id, 0, 2, Activity.RESULT_OK)
+        val result = store.partResult(id, 1, 2, Activity.RESULT_OK)!!
         assertTrue(result.getBoolean("hidden"))
         assertEquals("sent", result.getString("status"))
     }
@@ -79,12 +110,41 @@ class SmsSendStoreTest {
         store.mergeStatus(id, JSONObject().put("status", "queued"))
         assertEquals("sent", store.get(id)!!.getString("status"))
     }
+    @Test fun uncertainResultCannotBeRequeuedOrClaimedAgainAfterRestart() {
+        val prefs = FakeSharedPreferences()
+        val id = command().getString("id")
+        val first = SmsSendStore(prefs)
+        assertTrue(first.claim(command()))
+        first.mutate(id) { it.put("status", "unknown") }
+        val restarted = SmsSendStore(prefs)
+        restarted.mergeStatus(id, JSONObject().put("status", "queued"))
+        assertEquals("unknown", restarted.get(id)!!.getString("status"))
+        assertFalse(restarted.claim(command()))
+    }
     @Test fun partialFailureIsNeverShownAsSent() {
         val store = SmsSendStore(FakeSharedPreferences())
         val id = command().getString("id")
         store.claim(command())
-        store.partResult(id, 1, 2, false)
-        assertEquals("failed", store.partResult(id, 0, 2, true)!!.getString("status"))
-        assertNull(store.partResult(id, 4, 2, true))
+        store.partResult(id, 1, 2, SmsManager.RESULT_ERROR_NO_SERVICE)
+        val result = store.partResult(id, 0, 2, Activity.RESULT_OK)!!
+        assertEquals("failed", result.getString("status"))
+        assertTrue(result.getString("detail").contains("1 of 2 parts"))
+        assertTrue(result.getString("detail").contains("No cellular service"))
+        assertEquals(SmsManager.RESULT_ERROR_NO_SERVICE,
+            result.getJSONObject("part_errors").getJSONObject("1").getInt("result_code"))
+        assertNull(store.partResult(id, 4, 2, Activity.RESULT_OK))
+    }
+    @Test fun singlePartFailureKeepsRadioErrorAndNoFalsePartialClaim() {
+        val prefs = FakeSharedPreferences()
+        val store = SmsSendStore(prefs)
+        val data = command().put("parts", 1)
+        val id = data.getString("id")
+        store.claim(data)
+        val result = store.partResult(id, 0, 1, SmsManager.RESULT_ERROR_GENERIC_FAILURE, 42)!!
+        assertEquals("failed", result.getString("status"))
+        assertTrue(result.getString("detail").contains("No parts reached the carrier"))
+        assertTrue(result.getString("detail").contains("error 42"))
+        assertEquals(42, result.getJSONObject("part_errors").getJSONObject("0").getInt("radio_error_code"))
+        assertEquals("failed", SmsSendStore(prefs).get(id)!!.getString("status"))
     }
 }

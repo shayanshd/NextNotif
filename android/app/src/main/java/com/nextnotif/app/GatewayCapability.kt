@@ -3,7 +3,6 @@ package com.nextnotif.app
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 /** The rooted sender pieces that the live cellular-call bridge actually needs. */
 internal enum class GatewayCapability {
@@ -75,8 +74,8 @@ internal class ProcessGatewayCapabilityProbe : GatewayCapabilityProbe {
                     val process = ProcessBuilder(path, "-c", "id")
                         .redirectErrorStream(true)
                         .start()
-                    if (!process.waitFor(5, TimeUnit.SECONDS)) {
-                        process.destroyForcibly()
+                    if (!CompatProcess.waitFor(process, 5_000)) {
+                        CompatProcess.destroy(process)
                         null
                     } else {
                         process.inputStream.bufferedReader().readText().contains("uid=0")

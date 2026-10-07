@@ -4,7 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Shared notification path for WebSocket, Firebase RTDB, and FCM delivery. */
+/** Shared notification path for WebSocket and FCM delivery. */
 object IncomingEventHandler {
     private const val PREFS = "nextnotif_seen_events"
     private const val KEY = "ids"
@@ -52,7 +52,7 @@ object IncomingEventHandler {
             AppState.pushIncoming(type, data, code, eventId)
         }
         when (type) {
-            "sms" -> IncomingNotifier.notifySms(context, number, data.optString("body"), name)
+            "sms" -> IncomingNotifier.notifySms(context, number, data.optString("body"), name, code, eventId)
             "call" -> IncomingNotifier.notifyCall(
                 context,
                 number,
@@ -75,7 +75,8 @@ object IncomingEventHandler {
         data.opt("live_call_available") == true
 
     internal fun interactiveLiveCallAvailable(data: JSONObject, now: Long = System.currentTimeMillis()): Boolean {
-        return isLiveCallAvailable(data) && CallEventFreshness.permitsInteraction(callOfferTimestamp(data), now)
+        return Config.LIVE_CALL_BETA_ENABLED && isLiveCallAvailable(data) &&
+            CallEventFreshness.permitsInteraction(callOfferTimestamp(data), now)
     }
 
     internal fun callOfferTimestamp(data: JSONObject): Long? = when (val raw = data.opt("ts")) {

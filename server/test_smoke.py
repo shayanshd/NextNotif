@@ -197,6 +197,8 @@ async def check_create(h):
             "receiver_connected": False,
             "sender_name": None,
             "receiver_name": None,
+            "sender_battery": None,
+            "receiver_battery": None,
             "sender_has_fcm": False,
             "receiver_has_fcm": False,
         }
@@ -216,6 +218,8 @@ async def check_both_connect(h, code):
             "receiver_connected": True,
             "sender_name": "SmokeSender 1",
             "receiver_name": "SmokeReceiver 2",
+            "sender_battery": None,
+            "receiver_battery": None,
             "sender_has_fcm": False,
             "receiver_has_fcm": False,
         }
@@ -281,6 +285,8 @@ async def check_disconnect(h, code, sender):
                 "receiver_connected": True,
                 "sender_name": None,
                 "receiver_name": "SmokeReceiver 2",
+                "sender_battery": None,
+                "receiver_battery": None,
                 "sender_has_fcm": False,
                 "receiver_has_fcm": False,
             }:
@@ -373,6 +379,8 @@ async def check_header_code(h):
             "receiver_connected": False,
             "sender_name": None,
             "receiver_name": None,
+            "sender_battery": None,
+            "receiver_battery": None,
             "sender_has_fcm": False,
             "receiver_has_fcm": False,
         }, body

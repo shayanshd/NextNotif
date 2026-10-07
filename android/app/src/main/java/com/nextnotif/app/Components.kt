@@ -58,7 +58,7 @@ const val MIN_SECRET_LENGTH = 6
  *  pairings remain WebSocket so an upgrade never silently changes behavior. */
 fun initialTransportFor(editing: PairingInfo?): String = when {
     editing == null -> FcmOnDemand.TRANSPORT
-    editing.isFirebase -> FirebaseRelay.TRANSPORT
+    editing.isFirebase -> FcmOnDemand.TRANSPORT
     editing.isFcmOnDemand -> FcmOnDemand.TRANSPORT
     else -> TRANSPORT_WS
 }
@@ -119,7 +119,7 @@ enum class PairingReadinessKind {
 }
 
 enum class PairingIssueKind {
-    FIREBASE_CONFIG,
+    RETIRED_TRANSPORT,
     ALERT_REGISTRATION,
     QUEUE_SYNC,
     ACCESS_DENIED,
@@ -153,8 +153,7 @@ fun pairingReadinessKind(
 fun pairingIssueKind(raw: String): PairingIssueKind {
     val message = raw.lowercase()
     return when {
-        "firebase config" in message || "apikey" in message || "databaseurl" in message ->
-            PairingIssueKind.FIREBASE_CONFIG
+        "firebase database pairing retired" in message -> PairingIssueKind.RETIRED_TRANSPORT
         "fcm registration" in message || "register" in message && "alert" in message ->
             PairingIssueKind.ALERT_REGISTRATION
         "queue sync" in message -> PairingIssueKind.QUEUE_SYNC

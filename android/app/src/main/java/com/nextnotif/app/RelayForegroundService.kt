@@ -72,8 +72,6 @@ class RelayForegroundService : Service() {
     // by code; null when the pairing has no active sender role.
     private val uplinks = mutableMapOf<String, SenderUplink?>()
     private val lastBatteryReports = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Long>>()
-    // Per-pairing Firebase relays.
-    private val firebaseRelays = mutableMapOf<String, FirebaseRelay?>()
     // Per-pairing reconnect jobs — cancelling one does not affect the others.
     private val reconnectJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val answerRetryJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
@@ -255,11 +253,10 @@ class RelayForegroundService : Service() {
             addAll(pairings.map { it.code })
             addAll(sockets.keys)
             addAll(uplinks.keys)
-            addAll(firebaseRelays.keys)
             addAll(reconnectJobs.keys)
         }
         knownCodes.forEach(::stopPairing)
-        if (pairings.any { it.role == Role.SENDER }) {
+        if (pairings.any { it.role == Role.SENDER && !it.isFirebase }) {
             setupPhoneStateListener()
         } else {
             teardownPhoneStateListener()
@@ -267,12 +264,17 @@ class RelayForegroundService : Service() {
         pairings.forEach(::connectPairing)
     }
 
-    /** Connect one pairing on its transport (Firebase relay or WebSocket). */
+    /** Connect one pairing on its supported transport. */
     private fun connectPairing(p: PairingInfo) {
-        if (!p.isFirebase) SmsRelay.enqueue(this, p.code)
+        if (p.isFirebase) {
+            AppState.setConnState(p.code, AppState.ConnState.DISCONNECTED)
+            AppState.setPairingError(p.code, "Firebase Database pairing retired. Add a new FCM or WebSocket pairing on both phones.")
+            return
+        }
+        SmsRelay.enqueue(this, p.code)
         // Warm the bounded root/helper cache when the user explicitly enables
         // live calls. This keeps the first RINGING event from waiting on su.
-        if (p.role == Role.SENDER && p.liveCallEnabled) {
+        if (Config.LIVE_CALL_BETA_ENABLED && p.role == Role.SENDER && p.liveCallEnabled) {
             GatewayCapabilityFeedback.set(p.code, GatewayCapability.CHECKING)
             scope.launch {
                 val capability = gatewayCapability.get()
@@ -283,7 +285,6 @@ class RelayForegroundService : Service() {
             GatewayCapabilityFeedback.clear(p.code)
         }
         when (p.transport) {
-            FirebaseRelay.TRANSPORT -> startFirebaseRelay(p)
             FcmOnDemand.TRANSPORT -> {
                 if (p.role == Role.SENDER) prepareSenderUplink(p) else prepareFcmOnDemand(p)
             }
@@ -297,7 +298,6 @@ class RelayForegroundService : Service() {
         reconnectJobs.remove(pairing.code)?.cancel()
         reconnectAttempts.remove(pairing.code)
         sockets.remove(pairing.code)?.close()
-        stopFirebaseRelay(pairing.code)
         AppState.setConnState(pairing.code, AppState.ConnState.ON_DEMAND)
         AppState.setPartnerState(pairing.code, AppState.ConnState.ON_DEMAND)
         AppState.setPairingError(pairing.code, null)
@@ -314,12 +314,12 @@ class RelayForegroundService : Service() {
         reconnectAttempts.remove(pairing.code)
         sockets.remove(pairing.code)?.close()
         uplinks.getOrPut(pairing.code) {
-            SenderUplink(this, pairing.server, pairing.code, pairing.deviceToken)
+            SenderUplink(this, pairing.server, pairing.code, pairing.deviceToken, pairing.deviceId)
         }
         AppState.setConnState(pairing.code, AppState.ConnState.CONNECTED)
         AppState.setPairingError(pairing.code, null)
         AppState.push("WS", "sender uplink ready (code ${pairing.code})", pairing.code)
-        Log.i(TAG, "sender uplink ready code=${pairing.code}; no persistent socket")
+        Log.i(TAG, "sender uplink ready; no persistent socket")
         // FCM senders have no socket handshake carrying battery metadata. Send
         // the first reading as soon as the uplink is ready so a receiver does
         // not wait for the two-minute status poll after startup/reconnect.
@@ -336,95 +336,9 @@ class RelayForegroundService : Service() {
         sockets.remove(code)?.close()
         uplinks.remove(code)
         lastBatteryReports.remove(code)
-        stopFirebaseRelay(code)
         FcmOnDemand.cancel(this, code)
         GatewayCapabilityFeedback.clear(code)
         AppState.clearPairingState(code)
-    }
-
-    private fun startFirebaseRelay(pairing: PairingInfo) {
-        val cfg = if (pairing.fbConfig.isNullOrBlank()) {
-            FirebaseConfig.DEFAULT
-        } else {
-            FirebaseConfig.parse(pairing.fbConfig)
-        }
-        if (cfg == null) {
-            AppState.setConnState(pairing.code, AppState.ConnState.DISCONNECTED)
-            AppState.setPairingError(pairing.code, "Firebase config is invalid (paste apiKey + databaseURL)")
-            return
-        }
-        stopFirebaseRelay(pairing.code)
-        AppState.setConnState(pairing.code, AppState.ConnState.CONNECTING)
-        val relay = FirebaseRelay(
-            this,
-            pairing.role,
-            pairing.code,
-            cfg,
-            pairing.secret,
-            onState = { s -> handleFirebaseState(pairing.code, s) },
-            onPartnerState = { online, name ->
-                AppState.setPartnerState(
-                    pairing.code,
-                    if (online) AppState.ConnState.CONNECTED else AppState.ConnState.DISCONNECTED,
-                    name,
-                )
-            },
-            onIncoming = { type, data ->
-                scope.launch { handleIncoming(RelaySocket.Event.Incoming(type, data), pairing.code) }
-            },
-        )
-        firebaseRelays[pairing.code] = relay
-        relay.start()
-    }
-
-    private fun handleFirebaseState(code: String, s: FirebaseRelay.State) {
-        when (s) {
-            FirebaseRelay.State.CONNECTED -> {
-                reconnectJobs.remove(code)?.cancel()
-                reconnectAttempts.remove(code)
-                AppState.setConnState(code, AppState.ConnState.CONNECTED)
-                AppState.setPairingError(code, null)
-                AppState.push("WS", "firebase connected (code $code)", code)
-                Log.i(TAG, "firebase connected code=$code")
-                flushFbOutbox(firebaseRelays[code] ?: return)
-            }
-            FirebaseRelay.State.CONNECTING -> {
-                AppState.setConnState(code, AppState.ConnState.CONNECTING)
-            }
-            FirebaseRelay.State.DISCONNECTED -> {
-                val relay = firebaseRelays[code] ?: return
-                AppState.setConnState(code, AppState.ConnState.DISCONNECTED)
-                val err = relay.failed
-                AppState.setPairingError(code, err)
-                AppState.push("WS", "firebase $code disconnected: $err", code)
-                Log.w(TAG, "firebase $code: $err")
-                val p = SessionStore.load(this).pairings.firstOrNull { it.code == code }
-                if (p != null && relay.shouldRetry) {
-                    scheduleReconnectFor(p)
-                } else {
-                    reconnectJobs.remove(code)?.cancel()
-                    Log.w(TAG, "firebase $code: automatic retry suppressed until the relay is restarted")
-                }
-            }
-        }
-    }
-
-    private fun flushFbOutbox(relay: FirebaseRelay) {
-        var sent = 0
-        while (true) {
-            val entry = OutboxQueue.peek(this, relay.code) ?: break
-            if (!relay.send(entry.type, entry.data)) break
-            if (!OutboxQueue.acknowledge(this, relay.code, entry.id)) break
-            sent++
-        }
-        if (sent > 0) {
-            AppState.push("WS", "flushed $sent queued event(s) for ${relay.code}", relay.code)
-        }
-    }
-
-    private fun stopFirebaseRelay(code: String) {
-        firebaseRelays[code]?.stop()
-        firebaseRelays.remove(code)
     }
 
     private fun connect(pairing: PairingInfo) {
@@ -446,6 +360,7 @@ class RelayForegroundService : Service() {
             pairing.deviceToken,
             SessionStore.fcmToken(this),
             fcmOnDemand = pairing.isFcmOnDemand,
+            deviceId = pairing.deviceId,
         ) { evt ->
             // Generation guard: a superseded socket's late events (its close
             // handshake lands after the replacement is already open) must not
@@ -472,7 +387,7 @@ class RelayForegroundService : Service() {
                 AppState.setConnState(pairing.code, AppState.ConnState.CONNECTED)
                 AppState.setPairingError(pairing.code, null)
                 AppState.push("WS", "connected as ${pairing.role} (code ${pairing.code})", pairing.code)
-                Log.i(TAG, "ws open code=${pairing.code}")
+                Log.i(TAG, "ws open")
                 // Both roles now stay online for live calls, so refresh the
                 // peer label immediately instead of waiting for the timer.
                 scope.launch { pollPartnerStatusesOnce() }
@@ -512,7 +427,7 @@ class RelayForegroundService : Service() {
                 if (activeCallCode == pairing.code) pauseCallForReconnect(pairing.code, evt.reason)
                 AppState.setConnState(pairing.code, AppState.ConnState.DISCONNECTED)
                 AppState.push("WS", "closed ${pairing.code}: ${evt.reason}", pairing.code)
-                Log.w(TAG, "ws closed ${pairing.code}: ${evt.reason}")
+                Log.w(TAG, "ws closed")
                 scheduleReconnectFor(pairing)
             }
             is RelaySocket.Event.Failure -> {
@@ -520,7 +435,7 @@ class RelayForegroundService : Service() {
                 AppState.setConnState(pairing.code, AppState.ConnState.DISCONNECTED)
                 AppState.setPairingError(pairing.code, evt.error)
                 AppState.push("WS", "error ${pairing.code}: ${evt.error}", pairing.code)
-                Log.w(TAG, "ws failure ${pairing.code}: ${evt.error}")
+                Log.w(TAG, "ws failure")
                 scheduleReconnectFor(pairing)
             }
             is RelaySocket.Event.Incoming -> {
@@ -564,7 +479,7 @@ class RelayForegroundService : Service() {
                 deviceToken = if (idx == 0) token else cur.deviceToken,
             ),
         )
-        Log.i(TAG, "device token stored for $code")
+        Log.i(TAG, "device token stored")
     }
 
     private fun scheduleReconnectFor(pairing: PairingInfo) {
@@ -581,6 +496,20 @@ class RelayForegroundService : Service() {
     }
 
     private fun handleIncoming(evt: RelaySocket.Event.Incoming, code: String?) {
+        if (evt.type == "queue_ready" && code != null) {
+            FcmOnDemand.enqueueForWebSocket(this, code)
+            return
+        }
+        if (evt.type == "queue_overflow" && code != null) {
+            val dropped = evt.data.optInt("dropped").coerceAtLeast(0)
+            if (dropped > 0) {
+                val warning = "Relay queue full: $dropped older event(s) were lost. Check the receiver's connection."
+                AppState.setPairingError(code, warning)
+                AppState.push("DELIVERY", warning, code)
+                IncomingNotifier.notifyQueueOverflow(this, code, dropped)
+            }
+            return
+        }
         if (evt.type == "sms_sync" && code != null) {
             SmsRelay.enqueue(this, code)
             return
@@ -593,6 +522,8 @@ class RelayForegroundService : Service() {
             handleCallControl(code, evt.data)
             return
         }
+        if (code != null && evt.type in setOf("sms", "call", RelaySelfTest.EVENT_TYPE))
+            FcmOnDemand.enqueueForWebSocket(this, code)
         // Durable replay must be checked before passive call state or teardown.
         // The shared handler owns Ringing for every transport, including FCM.
         if (!IncomingEventHandler.handle(this, evt.type, evt.data, code, evt.eventId)) return
@@ -613,7 +544,7 @@ class RelayForegroundService : Service() {
         // outbox queue so an offline event is replayed to ALL partners, not
         // just the first one that answers. Each pairing also gets its own
         // OUT log entry so per-pairing activity views stay accurate.
-        val pairings = SessionStore.load(this).pairings.filter { it.role == Role.SENDER && it.enabled }
+        val pairings = SessionStore.load(this).pairings.filter { it.role == Role.SENDER && it.enabled && !it.isFirebase }
         for (p in pairings) {
             val outgoing = payloadForPairing(p, type, payload)
             if (sendToPairing(p, type, outgoing)) {
@@ -639,10 +570,10 @@ class RelayForegroundService : Service() {
         return JSONObject(payload.toString()).put("live_call_available", liveAvailable)
     }
 
-    /** Try one pairing's route now (WS uplink POST or Firebase relay). */
+    /** Try one pairing's relay route now. */
     private fun sendToPairing(p: PairingInfo, type: String, payload: JSONObject): Boolean {
-        return if (p.transport == FirebaseRelay.TRANSPORT) {
-            firebaseRelays[p.code]?.send(type, payload) ?: false
+        return if (p.isFirebase) {
+            false
         } else if (p.isWs && sockets[p.code]?.send(type, payload) == true) {
             true
         } else {
@@ -654,13 +585,20 @@ class RelayForegroundService : Service() {
         val p = SessionStore.load(this).pairings.firstOrNull { it.code == code && it.role == Role.SENDER }
             ?: return false
         val u = uplinks.getOrPut(code) {
-            SenderUplink(this, p.server, p.code, p.deviceToken)
+            SenderUplink(this, p.server, p.code, p.deviceToken, p.deviceId)
         }
-        return u?.send(type, payload) ?: false
+        val result = u?.sendDetailed(type, payload) ?: return false
+        if (result.overflowDropped > 0) {
+            val warning = "Relay queue full: ${result.overflowDropped} older event(s) were lost. Check the receiver's connection."
+            AppState.setPairingError(code, warning)
+            AppState.push("DELIVERY", warning, code)
+            IncomingNotifier.notifyQueueOverflow(this, code, result.overflowDropped)
+        }
+        return result.accepted
     }
 
     private fun flushOutbox() {
-        val pairings = SessionStore.load(this).pairings.filter { it.role == Role.SENDER && it.enabled }
+        val pairings = SessionStore.load(this).pairings.filter { it.role == Role.SENDER && it.enabled && !it.isFirebase }
         if (pairings.isEmpty()) return
         var anyFailed = false
         for (p in pairings) {
@@ -723,7 +661,7 @@ class RelayForegroundService : Service() {
                 networkCallback = cb
                 Log.i(TAG, "network callback registered")
             }
-            .onFailure { Log.w(TAG, "network callback unavailable: ${it.message}") }
+            .onFailure { Log.w(TAG, "network callback unavailable: ${it.javaClass.simpleName}") }
     }
 
     /** Poll /pair/{code}/status for every server-backed pairing and write the
@@ -747,6 +685,7 @@ class RelayForegroundService : Service() {
                 runCatching {
                     if (p.role == Role.SENDER) reportBatteryStatus(p)
                     val conn = URL("$http/pair/${p.code}/status").openConnection() as HttpURLConnection
+                    conn.pairingAuth(p)
                     conn.requestMethod = "GET"
                     conn.connectTimeout = 3000
                     conn.readTimeout = 3000
@@ -762,7 +701,7 @@ class RelayForegroundService : Service() {
                         )
                         if (p.role == Role.RECEIVER) notifyLowSenderBattery(p, partnerBattery)
                     }
-                }.onFailure { Log.w(TAG, "partner status poll failed for ${p.code}: ${it.message}") }
+                }.onFailure { Log.w(TAG, "partner status poll failed: ${it.javaClass.simpleName}") }
             }
         }
     }
@@ -788,14 +727,14 @@ class RelayForegroundService : Service() {
         conn.setRequestProperty("Content-Type", "application/json")
         conn.setRequestProperty("X-NextNotif-Code", pairing.code)
         conn.setRequestProperty("X-NextNotif-Role", "sender")
-        conn.setRequestProperty("X-NextNotif-Token", pairing.deviceToken)
+        conn.pairingAuth(pairing)
         conn.outputStream.use { it.write(JSONObject().put("battery_percent", battery).toString().toByteArray()) }
         if (conn.responseCode in 200..299) {
             conn.inputStream.close()
             lastBatteryReports[pairing.code] = battery to now
         } else {
             conn.errorStream?.close()
-            Log.w(TAG, "battery report rejected for ${pairing.code}: HTTP ${conn.responseCode}")
+            Log.w(TAG, "battery report rejected: HTTP ${conn.responseCode}")
         }
     }
 
@@ -867,6 +806,8 @@ class RelayForegroundService : Service() {
     }
 
     private fun setupPhoneStateListener() {
+        // Only the isolated call-test variant may observe cellular state.
+        if (Config.IS_STAGING_BUILD && BuildConfig.BUILD_TYPE != "stagingCall") return
         val session = SessionStore.load(this)
         // Any SENDER pairing needs the call-state listener (a phone can be
         // sender in one pairing and receiver in another).
@@ -896,7 +837,7 @@ class RelayForegroundService : Service() {
         }.onSuccess {
             Log.i(TAG, "call-state listener registered (sdk ${Build.VERSION.SDK_INT})")
         }.onFailure {
-            Log.w(TAG, "call-state listener unavailable: ${it.message}")
+            Log.w(TAG, "call-state listener unavailable: ${it.javaClass.simpleName}")
             // Do not leave a failed listener object cached: granting the
             // permission later must allow ACTION_RELOAD to register again.
             teardownPhoneStateListener()
@@ -945,7 +886,7 @@ class RelayForegroundService : Service() {
                 ?: if (state == TelephonyManager.CALL_STATE_IDLE) currentCallNumber ?: "unknown"
                 else "unknown"
         if (state == TelephonyManager.CALL_STATE_IDLE) currentCallNumber = null
-        Log.i(TAG, "call $stateStr $finalNumber")
+        Log.i(TAG, "call state $stateStr")
         val session = SessionStore.load(this@RelayForegroundService)
         if (session.pairings.none { it.role == Role.SENDER && it.enabled }) return
         val name = if (finalNumber != "unknown") {
@@ -1097,7 +1038,12 @@ class RelayForegroundService : Service() {
                 unansweredCallJobs.remove(code)?.cancel()
                 activeCallCode = code
                 val telecom = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-                runCatching { telecom.acceptRingingCall() }
+                runCatching {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                        error("Remote call answering requires Android 8 on the sender")
+                    }
+                    telecom.acceptRingingCall()
+                }
                     .onFailure {
                         sockets[code]?.send(
                             "call_control",
@@ -1241,7 +1187,7 @@ class RelayForegroundService : Service() {
     }
 
     private fun liveCallDenial(pairing: PairingInfo): String? {
-        if (pairing.role != Role.SENDER || !pairing.enabled || !pairing.liveCallEnabled) {
+        if (!Config.LIVE_CALL_BETA_ENABLED || pairing.role != Role.SENDER || !pairing.enabled || !pairing.liveCallEnabled) {
             return "Live call relay is not enabled on the sender phone"
         }
         if (!PermissionPolicy.liveCallPermissionsReady(
@@ -1480,7 +1426,7 @@ class RelayForegroundService : Service() {
         }
         callMetrics.remove(code)?.let { tracker ->
             val summary = tracker.finish(reason).logLine()
-            Log.i(TAG, "call metrics code=$code $summary")
+            Log.i(TAG, "call metrics $summary")
             AppState.push("CALL", "call summary $summary", code)
         }
         if (AppState.callRelay.value.code == code) AppState.finishCall(code, error)
@@ -1564,8 +1510,6 @@ class RelayForegroundService : Service() {
         for ((_, s) in sockets) s.close()
         sockets.clear()
         uplinks.clear()
-        for ((_, relay) in firebaseRelays) relay?.stop()
-        firebaseRelays.clear()
         teardownPhoneStateListener()
         teardownNetworkCallback()
         // Wipe every per-pairing + aggregate state so the UI goes back to a
@@ -1608,10 +1552,12 @@ class RelayForegroundService : Service() {
     }
 
     private fun promoteCallForeground() {
+        if (!Config.LIVE_CALL_BETA_ENABLED) return
         updateCallForeground()
     }
 
     private fun updateCallForeground() {
+        if (!Config.LIVE_CALL_BETA_ENABLED) return
         val call = AppState.callRelay.value
         val code = call.code ?: activeCallCode ?: return
         val pi = PendingIntent.getActivity(
@@ -1641,6 +1587,12 @@ class RelayForegroundService : Service() {
             .setSmallIcon(R.drawable.ic_stat_relay)
             .setContentIntent(pi)
             .setOngoing(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(NotificationCompat.Builder(this, Notifications.CHANNEL_RELAY)
+                .setSmallIcon(R.drawable.ic_stat_relay)
+                .setContentTitle("NextNotif call")
+                .setContentText("Unlock to view details")
+                .build())
             .addAction(0, "Hang up", hangup)
             .build()
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {

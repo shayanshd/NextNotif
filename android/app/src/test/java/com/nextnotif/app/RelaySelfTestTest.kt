@@ -15,11 +15,12 @@ class RelaySelfTestTest {
     )
 
     @Test
-    fun `only enabled FCM sender can start test`() {
+    fun `enabled FCM and WebSocket senders can start test`() {
         assertTrue(RelaySelfTest.canSend(sender))
+        assertTrue(RelaySelfTest.canSend(sender.copy(transport = null)))
         assertFalse(RelaySelfTest.canSend(sender.copy(enabled = false)))
         assertFalse(RelaySelfTest.canSend(sender.copy(role = Role.RECEIVER)))
-        assertFalse(RelaySelfTest.canSend(sender.copy(transport = null)))
+        assertFalse(RelaySelfTest.canSend(sender.copy(transport = LEGACY_FIREBASE_TRANSPORT)))
     }
 
     @Test
@@ -46,10 +47,11 @@ class RelaySelfTestTest {
 
     @Test
     fun `uplink response exposes queued delivery`() {
-        val result = SenderUplink.parseAcceptedResponse("""{"delivered":false,"queued":2}""")
+        val result = SenderUplink.parseAcceptedResponse("""{"delivered":false,"queued":2,"overflow_dropped":1}""")
 
         assertTrue(result.accepted)
         assertFalse(result.deliveredDirectly ?: true)
         assertEquals(2, result.queuedCount)
+        assertEquals(1, result.overflowDropped)
     }
 }

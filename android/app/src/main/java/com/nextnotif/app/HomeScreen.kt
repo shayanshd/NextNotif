@@ -284,7 +284,8 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            if (destination == HomeDestination.CALLS && pairings.any { it.enabled && it.role == Role.RECEIVER && !it.isFirebase }) {
+            if (Config.LIVE_CALL_BETA_ENABLED && destination == HomeDestination.CALLS &&
+                pairings.any { it.enabled && it.role == Role.RECEIVER && !it.isFirebase }) {
                 ExtendedFloatingActionButton(onClick = { composingCall = true },
                     icon = { Icon(Icons.Default.Phone, null) }, text = { Text(stringResource(R.string.outgoing_call_action)) })
             } else if (destination == HomeDestination.MESSAGES && conversation == null && pairings.any { it.enabled && it.role == Role.RECEIVER && !it.isFirebase }) {
@@ -374,7 +375,10 @@ fun HomeScreen(
                             onToggleService = onToggleService,
                         )
                     }
-                    if (pairings.any { it.enabled && it.role == Role.SENDER && !it.isFirebase }) item { SmsPermissionCard() }
+                    if ((!Config.IS_STAGING_BUILD || BuildConfig.BUILD_TYPE == "stagingSms") &&
+                        pairings.any { it.enabled && it.role == Role.SENDER && !it.isFirebase }) {
+                        item { SmsPermissionCard() }
+                    }
                     if (notifPermMissing) item { NotifPermBanner(onEnable = onRequestNotifPerm) }
                     if (liveCallPermMissing) item {
                         LiveCallPermBanner(onFinishSetup = onFinishLiveCallSetup)
@@ -667,10 +671,7 @@ private fun PairingCard(
         Triple(Icons.Default.Notifications, cs.secondaryContainer, cs.onSecondaryContainer)
     }
     val transportLabel = when {
-        pairing.isFirebase -> stringResource(
-            if (pairing.fbConfig.isNullOrBlank()) R.string.home_transport_firebase
-            else R.string.home_transport_firebase_own
-        )
+        pairing.isFirebase -> stringResource(R.string.home_transport_firebase)
         pairing.isFcmOnDemand -> stringResource(R.string.home_transport_fcm)
         else -> serverHost(pairing.server)
     }
@@ -803,7 +804,7 @@ private fun PairingCard(
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
                 )
             }
-            if (enabled && pairing.role == Role.SENDER && pairing.liveCallEnabled) {
+            if (Config.LIVE_CALL_BETA_ENABLED && enabled && pairing.role == Role.SENDER && pairing.liveCallEnabled) {
                 LiveCallCapabilitySummary(
                     capability = liveCallCapability,
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
@@ -863,7 +864,7 @@ private fun PairingReadinessSummary(
             stringResource(R.string.home_status_needs_permission_detail)
         PairingReadinessKind.CONNECTING -> stringResource(R.string.home_status_connecting_detail)
         PairingReadinessKind.RETRYING -> when (pairingIssueKind(error.orEmpty())) {
-            PairingIssueKind.FIREBASE_CONFIG -> stringResource(R.string.home_issue_firebase_config)
+            PairingIssueKind.RETIRED_TRANSPORT -> stringResource(R.string.setup_legacy_firebase_migration)
             PairingIssueKind.ALERT_REGISTRATION -> stringResource(R.string.home_issue_alert_registration)
             PairingIssueKind.QUEUE_SYNC -> stringResource(R.string.home_issue_queue_sync)
             PairingIssueKind.ACCESS_DENIED -> stringResource(R.string.home_issue_access_denied)

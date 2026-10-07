@@ -61,7 +61,7 @@ internal object HardwareCompatibilityScanner {
 
     private fun audioDevices(context: Context): List<AudioDeviceSnapshot> {
         val manager = context.getSystemService(AudioManager::class.java) ?: return emptyList()
-        return manager.getDevices(AudioManager.GET_DEVICES_ALL).map { device ->
+        return manager.getDevices(AudioManager.GET_DEVICES_INPUTS or AudioManager.GET_DEVICES_OUTPUTS).map { device ->
             AudioDeviceSnapshot(
                 name = device.productName?.toString()?.takeIf { it.isNotBlank() }
                     ?: "Audio device ${device.id}",

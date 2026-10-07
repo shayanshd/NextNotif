@@ -36,7 +36,8 @@ export function updateSms(records, result) {
   return true;
 }
 export function expireSms(records, now = Date.now()) {
-  return records.map(x => x.status === 'queued' && x.expires_at <= now
+  return records.filter(x => Number.isSafeInteger(x.created_at) && x.created_at > now - SMS_RETENTION_MS)
+    .map(x => x.status === 'queued' && x.expires_at <= now
     ? { ...x, status: 'expired', detail: 'Sender did not send before the request expired' } : x);
 }
 
