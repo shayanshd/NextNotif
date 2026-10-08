@@ -261,6 +261,6 @@ class SessionStoreTest {
     @Test
     fun liveCallOptInIsForcedOffForReceiverRole() {
         assertEquals(false, liveCallEnabledFor(Role.RECEIVER, requested = true))
-        assertEquals(true, liveCallEnabledFor(Role.SENDER, requested = true))
+        assertEquals(Config.LIVE_CALL_BETA_ENABLED, liveCallEnabledFor(Role.SENDER, requested = true))
     }
 }

@@ -555,6 +555,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun upsertPairing(a: UiAction.UpsertPairing) {
+        if (Config.RECEIVER_ONLY_BUILD && a.role != Role.RECEIVER) {
+            uiError.value = getString(R.string.setup_receiver_only_build)
+            return
+        }
         if (!Config.allowsServer(a.server)) {
             uiError.value = "Staging app only connects to ${Config.DEFAULT_SERVER}"
             return

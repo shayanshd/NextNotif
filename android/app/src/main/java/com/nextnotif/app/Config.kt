@@ -2,8 +2,9 @@ package com.nextnotif.app
 
 object Config {
     val IS_STAGING_BUILD: Boolean = BuildConfig.BUILD_TYPE.startsWith("staging")
+    val RECEIVER_ONLY_BUILD: Boolean = BuildConfig.BUILD_TYPE == "htcReceiver"
     /** The private release ships baseline call alerts; rooted live audio is a separate beta. */
-    val LIVE_CALL_BETA_ENABLED: Boolean = BuildConfig.BUILD_TYPE != "release"
+    val LIVE_CALL_BETA_ENABLED: Boolean = BuildConfig.BUILD_TYPE != "release" && !RECEIVER_ONLY_BUILD
     /** Production-safe default. Debug builds may still accept a ws:// LAN relay. */
     val DEFAULT_SERVER = if (IS_STAGING_BUILD)
         "wss://nextnotif-relay-staging.shayanshad.workers.dev"

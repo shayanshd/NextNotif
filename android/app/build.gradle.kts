@@ -25,7 +25,8 @@ android {
 
     defaultConfig {
         applicationId = "com.nextnotif.app"
-        // API 25 is an explicit device-test override, never the private release default.
+        // API 25 is an explicit HTC private-MVP compatibility exception;
+        // the ordinary private release and future public release stay at API 26.
         minSdk = if (compatibilityTestMinSdk == "25") 25 else 26
         targetSdk = 34
         versionCode = 2
@@ -55,6 +56,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+        }
+        create("htcReceiver") {
+            initWith(getByName("release"))
+            matchingFallbacks += listOf("release")
+            resValue("string", "app_name", "NextNotif Receiver")
         }
         debug {
             isDebuggable = true

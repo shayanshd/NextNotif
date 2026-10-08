@@ -62,4 +62,17 @@ jobs:
       - name: Use non-production Firebase config for compile checks
         run: cp android/app/google-services.ci.json android/app/google-services.json
       - name: Test, lint, and build unsigned APKs
-        run: cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease --no-daemon
+        run: |
+          cd android
+          ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease --no-daemon
+          ./gradlew testHtcReceiverUnitTest lintHtcReceiver assembleHtcReceiver -PnextnotifCompatibilityTestMinSdk=25 --no-daemon
+          AAPT="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name aapt | sort -V | tail -1)"
+          RELEASE_APK="$(find app/build/outputs/apk/release -maxdepth 1 -name 'app-release*.apk' -print -quit)"
+          HTC_APK="$(find app/build/outputs/apk/htcReceiver -maxdepth 1 -name 'app-htcReceiver*.apk' -print -quit)"
+          test -n "$RELEASE_APK" && test -n "$HTC_APK"
+          "$AAPT" dump badging "$RELEASE_APK" | grep -F "sdkVersion:'26'"
+          "$AAPT" dump badging "$HTC_APK" | grep -F "sdkVersion:'25'"
+          if "$AAPT" dump permissions "$HTC_APK" | grep -E 'android.permission.(RECEIVE_SMS|SEND_SMS|READ_SMS|READ_PHONE_STATE|READ_CONTACTS|ANSWER_PHONE_CALLS|CALL_PHONE|RECORD_AUDIO)'; then
+            echo 'HTC receiver APK includes a gateway permission' >&2
+            exit 1
+          fi

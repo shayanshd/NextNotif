@@ -5,6 +5,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CallEventFreshnessTest {
+    @Test fun privateReceiverBuildCannotOfferLiveCallActions() {
+        if (BuildConfig.BUILD_TYPE == "htcReceiver") {
+            assertFalse(Config.LIVE_CALL_BETA_ENABLED)
+        }
+    }
+
     @Test fun onlyRecentOffersAreInteractive() {
         assertTrue(CallEventFreshness.permitsInteraction(10_000L, 100_000L))
         assertFalse(CallEventFreshness.permitsInteraction(9_999L, 100_000L))
@@ -28,7 +34,7 @@ class CallEventFreshnessTest {
             assertFalse(IncomingEventHandler.interactiveLiveCallAvailable(payload, 100_000L))
         }
         payload.put("ts", 100_000L)
-        assertTrue(IncomingEventHandler.interactiveLiveCallAvailable(payload, 100_000L))
+        assertEquals(Config.LIVE_CALL_BETA_ENABLED, IncomingEventHandler.interactiveLiveCallAvailable(payload, 100_000L))
         payload.put("live_call_available", false)
         assertFalse(IncomingEventHandler.interactiveLiveCallAvailable(payload, 100_000L))
     }

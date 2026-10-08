@@ -77,7 +77,7 @@ fun AddEditPairingScreen(
     val isEdit = editing != null
     val secureEdit = editing?.deviceId != null
     var label by remember { mutableStateOf(editing?.label ?: "") }
-    var role by remember { mutableStateOf<Role?>(editing?.role) }
+    var role by remember { mutableStateOf<Role?>(editing?.role ?: if (Config.RECEIVER_ONLY_BUILD) Role.RECEIVER else null) }
     var code by remember { mutableStateOf(editing?.code ?: "") }
     var server by remember { mutableStateOf(editing?.server ?: Config.DEFAULT_SERVER) }
     var setupMode by remember { mutableStateOf(PairingSetupMode.CREATE) }
@@ -91,7 +91,7 @@ fun AddEditPairingScreen(
     val isFcmOnDemand = transport == FcmOnDemand.TRANSPORT
     val parsedInvite = remember(inviteText) { SecureInviteText.parse(inviteText) }
     val ready = when {
-        editing?.isFirebase == true || role == null -> false
+        editing?.isFirebase == true || role == null || (Config.RECEIVER_ONLY_BUILD && role != Role.RECEIVER) -> false
         isEdit -> code.length == 6
         setupMode == PairingSetupMode.CREATE -> SecureInviteText.validServer(server.trim().trimEnd('/'))
         else -> parsedInvite != null && role == parsedInvite.role
@@ -137,7 +137,7 @@ fun AddEditPairingScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    RoleCard(
+                    if (!Config.RECEIVER_ONLY_BUILD) RoleCard(
                         selected = role == Role.SENDER,
                         icon = Icons.Filled.Send,
                         title = stringResource(R.string.setup_sender),
@@ -349,7 +349,10 @@ fun AddEditPairingScreen(
                         value = inviteText,
                         onValueChange = { value ->
                             inviteText = value.take(512)
-                            SecureInviteText.parse(inviteText)?.let { role = it.role; server = it.server }
+                            SecureInviteText.parse(inviteText)?.let {
+                                if (!Config.RECEIVER_ONLY_BUILD || it.role == Role.RECEIVER) role = it.role
+                                server = it.server
+                            }
                         },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text(stringResource(R.string.setup_invite_label)) },
@@ -358,6 +361,9 @@ fun AddEditPairingScreen(
                     )
                     if (inviteText.isNotBlank() && parsedInvite == null) {
                         Text(stringResource(R.string.setup_invite_invalid),
+                            color = MaterialTheme.colorScheme.error)
+                    } else if (Config.RECEIVER_ONLY_BUILD && parsedInvite?.role == Role.SENDER) {
+                        Text(stringResource(R.string.setup_receiver_only_build),
                             color = MaterialTheme.colorScheme.error)
                     }
                 }

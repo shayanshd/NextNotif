@@ -62,7 +62,7 @@ class PermissionPolicyTest {
             liveCallEnabled = true,
         )
 
-        assertEquals(true, PermissionPolicy.needsLiveCallPermissions(listOf(sender)))
+        assertEquals(Config.LIVE_CALL_BETA_ENABLED, PermissionPolicy.needsLiveCallPermissions(listOf(sender)))
         assertEquals(
             false,
             PermissionPolicy.needsLiveCallPermissions(listOf(sender.copy(liveCallEnabled = false))),

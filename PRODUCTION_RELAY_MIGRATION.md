@@ -1,6 +1,6 @@
 # Production relay retention and pairing migration
 
-Status: **prepared, not deployed** (2026-10-08). Current production Worker checkpoint: `56286d69-ab26-468c-ac74-6c3a88dff283` (read-only Wrangler check on 2026-10-07/08). The current Worker source retains legacy-client behavior while supporting new invite pairings; it does not convert old pairing credentials in place. The owner approved revoking old pairings and creating fresh copied-invite pairings during cutover.
+Status: **prepared, not deployed** (2026-10-08). Current production Worker checkpoint: `56286d69-ab26-468c-ac74-6c3a88dff283` (read-only Wrangler check on 2026-10-08). Signed version 2 apps are already installed on Samsung and HTC; the planned backend-before-client order was missed. Treat their production pairing and delivery as unverified until the compatible Worker is deployed and checked. The current Worker source retains legacy-client behavior while supporting new invite pairings; it does not convert old pairing credentials in place. The owner approved revoking old pairings and creating fresh copied-invite pairings during cutover.
 
 ## Scope
 
@@ -13,7 +13,7 @@ The new code prunes queued relay events after seven days and SMS/call command re
 1. Confirm a clean source commit, passing Worker unit tests, both local workerd runtime configurations (SQLite and legacy KV), and `wrangler deploy --dry-run --config wrangler.jsonc`. The local legacy fixture checks old status, token-authenticated fetch, code-only send/drain compatibility, expired queue pruning, and secure namespace isolation. It does not contain actual production data.
 2. Recheck production Worker deployment ID, relay hostname/root, Durable Object namespace ID/backend, current Secret binding types, and the original Samsung app's connectivity. Record the old Worker version as the rollback checkpoint. Do not display pairing codes or credentials.
 3. Create a new random maintenance token in a secure vault and add it as a production Worker **Secret**; never use a plain-text variable. Provision a separate short-lived Cloudflare API token with only Workers Scripts Read for listing namespace objects. Do not reuse the FCM, TURN, or signing credentials.
-4. Determine how to test one original client against the updated backend without reading message content. Keep the new Android package off Samsung until old-client compatibility is confirmed.
+4. Determine whether an original client remains available for a content-free compatibility check. The new Android package is already on Samsung, so verify its actual package, pairing, and rollback state before treating this as a controlled client cutover.
 
 ## Controlled rollout
 
@@ -27,4 +27,4 @@ The new code prunes queued relay events after seven days and SMS/call command re
 
 If old clients fail after code deployment, restore the recorded previous Worker version while the original client remains installed. This code rollback does not reverse data already purged at its retention boundary. New secure pairings created on the updated Worker may not work on the old version, so freeze new-client rollout until backend canary passes. A cloud rollback must be tested before relying on it during the Samsung cutover.
 
-The backfill is a privacy/data-expiry operation; run it only after the owner has approved the seven-day retention, which they did. It does not revoke a pairing, retire legacy code-only routes, or shut down old Firebase Database access. Those are separate cutover steps. The original Samsung app and production Worker have not been changed by preparing this document.
+The backfill is a privacy/data-expiry operation; run it only after the owner has approved the seven-day retention, which they did. It does not revoke a pairing, retire legacy code-only routes, or shut down old Firebase Database access. Those are separate cutover steps. The production Worker has not been changed by preparing this document; Samsung's installed app has since changed as recorded above.

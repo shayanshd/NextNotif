@@ -1,10 +1,10 @@
 # Samsung A5 private MVP controlled replacement plan
 
-Status: **plan only** (2026-10-08). The owner chose replacement of the original `com.nextnotif.app` system app and revocation of old pairings followed by fresh copied-invite pairing for the private MVP. No replacement, package-data reset, production Worker deployment, or carrier send is authorized by this plan.
+Status: **partly overtaken by observed installation** (2026-10-08). Read-only ADB now shows a signed versionCode 2 `com.nextnotif.app` in `/data/app` on Samsung, matching the local private APK. This plan predates that install. Its backup, module, pairing, and rollback steps have **not** been verified against what was actually done; check those facts before proceeding. The production Worker is still on the 2026-09-15 version. The owner chose revocation of old pairings followed by fresh copied-invite pairing for the private MVP.
 
 ## Why this needs a maintenance window
 
-The installed Samsung system app and the new privately signed APK use different signing certificates. Android cannot update `com.nextnotif.app` in place across that boundary. The original app lives in the `nextnotif_privapp` Magisk module at `/system/priv-app/NextNotif/NextNotif.apk`; `tools/install-call-relay-module.sh` writes that module directly and must not be used as a first cutover step. Schedule a period when forwarding can be paused and the owner can verify both phones and recover the A5 if boot or package scanning fails.
+The previously installed Samsung system app and the new privately signed APK use different signing certificates. Android cannot update `com.nextnotif.app` in place across that boundary. The original app lived in the `nextnotif_privapp` Magisk module at `/system/priv-app/NextNotif/NextNotif.apk`; its current module state needs verification. `tools/install-call-relay-module.sh` writes that module directly and must not be used as a blind next step. Check how the new app was installed and whether rollback remains available before further changes.
 
 ## Gates before touching the original package
 

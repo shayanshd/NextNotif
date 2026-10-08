@@ -10,6 +10,7 @@
     <string name="setup_sender_desc">Forwards SMS &amp; calls from this phone</string>
     <string name="setup_receiver">Receiver</string>
     <string name="setup_receiver_desc">Gets alerts for the other phone</string>
+    <string name="setup_receiver_only_build">This app can only receive alerts. Create the sender pairing on the other phone.</string>
     <string name="setup_pairing_label">Pairing</string>
     <string name="setup_invite_mode_label">Pairing setup</string>
     <string name="setup_invite_create">Create an invite</string>
