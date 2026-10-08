@@ -1,6 +1,6 @@
 # Production relay retention and pairing migration
 
-Status: **prepared, not deployed** (2026-10-08). Current production Worker checkpoint: `56286d69-ab26-468c-ac74-6c3a88dff283` (read-only Wrangler check on 2026-10-07/08). The current Worker source retains legacy-client behavior while supporting new invite pairings; it does not convert old pairing credentials in place. Pairing revocation/re-creation is an owner-visible client step.
+Status: **prepared, not deployed** (2026-10-08). Current production Worker checkpoint: `56286d69-ab26-468c-ac74-6c3a88dff283` (read-only Wrangler check on 2026-10-07/08). The current Worker source retains legacy-client behavior while supporting new invite pairings; it does not convert old pairing credentials in place. The owner approved revoking old pairings and creating fresh copied-invite pairings during cutover.
 
 ## Scope
 
@@ -20,11 +20,11 @@ The new code prunes queued relay events after seven days and SMS/call command re
 1. Deploy the compatible Worker code before new Android clients. Confirm deployment version and bindings; check root health and a synthetic secure pairing on production only after explicit approval and with cleanup credentials preserved. Verify an original client's connection/status remains healthy.
 2. Set `CLOUDFLARE_ACCOUNT_ID`, `NEXTNOTIF_PAIRING_NAMESPACE_ID`, and `CLOUDFLARE_API_TOKEN` in a private operator environment. Run `python3 tools/backfill-relay-retention.py` without flags and record the count only. It must match the intended production namespace; a surprising count stops the rollout.
 3. Set `NEXTNOTIF_MAINTENANCE_TOKEN` from the vault, run `python3 tools/backfill-relay-retention.py --apply`, and compare touched count to the dry-run count. Rerun the dry run and apply once to catch objects created during pagination. The operation is idempotent; it never returns or prints stored content. A failed or partial run stops for diagnosis rather than silently declaring retention complete.
-4. Verify a known old client still functions, a new invite pairing passes create/join/send/fetch/ACK/deletion, and a controlled aged-data fixture gets an alarm. Monitor content-free errors, queue overflow, and FCM wake status. Keep legacy routes until old clients have moved to secure pairings.
+4. Verify a known old client still functions, a new invite pairing passes create/join/send/fetch/ACK/deletion, and a controlled aged-data fixture gets an alarm. Monitor content-free errors, queue overflow, and FCM wake status. Keep legacy routes until old clients have moved to fresh secure pairings. Then disable legacy code-only routes and verify the old credentials fail before calling the cutover complete.
 5. After backfill, remove the temporary maintenance Secret and revoke the listing API token. The maintenance route then returns 404. Recheck the active Worker version and Secret inventory by name/type only.
 
 ## Rollback and limits
 
 If old clients fail after code deployment, restore the recorded previous Worker version while the original client remains installed. This code rollback does not reverse data already purged at its retention boundary. New secure pairings created on the updated Worker may not work on the old version, so freeze new-client rollout until backend canary passes. A cloud rollback must be tested before relying on it during the Samsung cutover.
 
-The backfill is a privacy/data-expiry operation; run it only after the owner has approved the seven-day retention, which they did. It does not revoke a pairing, migrate a legacy six-digit credential, or shut down old Firebase Database access. Those are separate cutover steps. The original Samsung app and production Worker have not been changed by preparing this document.
+The backfill is a privacy/data-expiry operation; run it only after the owner has approved the seven-day retention, which they did. It does not revoke a pairing, retire legacy code-only routes, or shut down old Firebase Database access. Those are separate cutover steps. The original Samsung app and production Worker have not been changed by preparing this document.

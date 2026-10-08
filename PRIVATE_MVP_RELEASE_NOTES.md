@@ -14,7 +14,7 @@ Status: **draft, not approved for installation or distribution** (2026-10-07).
 - SIM 1 has one confirmed remote send and owner-confirmed receipt. SIM 2 remains visible by owner choice but has not passed a carrier send test. Multipart remote sending and long-term reliability are also unvalidated. Confirm the chosen SIM and recipient before sending; do not repeat an uncertain send without checking its status.
 - Rooted live-call answer/audio is excluded from the private release. Incoming-call information and alerts remain in scope.
 - The relay processes SMS/call metadata and content to deliver it; there is no end-to-end encryption between paired phones. Local app storage is encrypted with Android Keystore on supported devices.
-- The original Samsung system app has a different signing certificate. Its eventual replacement requires the separate controlled cutover and may require re-pairing after verified backup. Do not install this APK over it directly.
+- The original Samsung system app has a different signing certificate. Its eventual replacement requires the separate controlled cutover and a verified backup. Old pairings will be revoked and recreated with fresh copied invites, as approved by the owner. Do not install this APK over it directly.
 
 ## Release record to fill at approval
 
