@@ -1,6 +1,6 @@
 # Samsung A5 private MVP controlled replacement plan
 
-Status: **partly overtaken by observed installation** (2026-10-08). Read-only ADB now shows a signed versionCode 2 `com.nextnotif.app` in `/data/app` on Samsung, matching the local private APK. This plan predates that install. Its backup, module, pairing, and rollback steps have **not** been verified against what was actually done; check those facts before proceeding. The production Worker is still on the 2026-09-15 version. The owner chose revocation of old pairings followed by fresh copied-invite pairing for the private MVP.
+Status: **partly overtaken by observed installation** (2026-10-08). Read-only ADB now shows a signed versionCode 2 `com.nextnotif.app` in `/data/app` on Samsung, matching the local private APK. This plan predates that install. Its backup, module, pairing, and rollback steps have **not** been verified against what was actually done; check those facts before proceeding. Compatible production Worker code is now deployed as `9269cdfb-b9c0-4509-a6ba-6e18c65f4b06`, but phone delivery is not yet verified. The owner chose revocation of old pairings followed by fresh copied-invite pairing for the private MVP.
 
 ## Why this needs a maintenance window
 

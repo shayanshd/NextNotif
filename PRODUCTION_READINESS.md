@@ -2,6 +2,8 @@
 
 Current operator summary: [MVP_PRODUCTION_HANDOFF.md](MVP_PRODUCTION_HANDOFF.md).
 
+2026-10-08 operator checkpoint: production Worker code `9269cdfb-b9c0-4509-a6ba-6e18c65f4b06` is deployed and passed a disposable secure HTTP pairing/deletion probe. Legacy routes remain enabled, existing quiet-object retention backfill is pending, and the newly installed Samsung/HTC version 2 apps have not passed a production phone canary. The separate signing-key backup is still unconfirmed. Detailed older checkpoints below are historical.
+
 Initial source review: 2026-10-01 from `release-user-friendly` at `1472b63`; staging device evidence was added through 2026-10-07 below. This review does not certify the private release APK, production Worker, Play approval, or broad physical-device reliability. Removed historical checkpoints remain in Git history, but their deployment and test claims must be reverified for a release candidate.
 
 ## Release decision
