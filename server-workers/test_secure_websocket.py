@@ -42,7 +42,7 @@ def fixture():
 
 def runtime_checks():
     for route in ("/test", "/http-test", "/routes-test", "/rate-test",
-                  "/legacy-migration-test"):
+                  "/legacy-migration-test", "/maintenance-route-test"):
         with urllib.request.urlopen(BASE + route, timeout=15) as response:
             assert response.status == 200 and json.load(response)["ok"] is True
 

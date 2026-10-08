@@ -553,6 +553,17 @@ export class RelayPairing extends DurableObject {
     const isWsUpgrade = (request.headers.get('Upgrade') || '').toLowerCase() === 'websocket';
     const parts = url.pathname.split('/').filter(Boolean);
     const operation = parts[0];
+    // Only the top-level Worker can forward this internal request. It touches
+    // an existing object so old, inactive queues receive retention alarms.
+    if (operation === '__maintenance-touch' && request.method === 'POST' && parts.length === 1) {
+      await this.getQueue();
+      for (const [key, expire] of [['smsCommands', expireSms], ['callCommands', expireCalls]]) {
+        const records = await this.state.storage.get(key);
+        if (Array.isArray(records) && records.length) await this.state.storage.put(key, expire(records));
+      }
+      await this.rescheduleMaintenance();
+      return Response.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } });
+    }
     const smsOperation = ['sms-submit', 'sms-fetch', 'sms-result', 'sms-status'].includes(operation);
     const callOperation = ['call-submit', 'call-fetch', 'call-result', 'call-status', 'call-cancel'].includes(operation);
     const requestedRole = request.headers.get('X-NextNotif-Role') || 'receiver';
@@ -1163,6 +1174,32 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const parts = url.pathname.split('/').filter(Boolean);
+
+    if (url.pathname === '/__maintenance/touch' && request.method === 'POST') {
+      const expected = env.NEXTNOTIF_MAINTENANCE_TOKEN;
+      if (typeof expected !== 'string' || expected.length < 32) return new Response('Not found', { status: 404 });
+      const presented = request.headers.get('X-NextNotif-Maintenance-Token') || '';
+      if (presented.length > 256) return new Response('Unauthorized', { status: 401 });
+      const encoder = new TextEncoder();
+      const [a, b] = await Promise.all([
+        crypto.subtle.digest('SHA-256', encoder.encode(presented)),
+        crypto.subtle.digest('SHA-256', encoder.encode(expected)),
+      ]);
+      const left = new Uint8Array(a);
+      const right = new Uint8Array(b);
+      let difference = 0;
+      for (let i = 0; i < left.length; i++) difference |= left[i] ^ right[i];
+      if (!presented || difference !== 0) return new Response('Unauthorized', { status: 401 });
+      let body;
+      try { body = JSON.parse(await readRelayBody(request, 128)); }
+      catch { return Response.json({ error: 'invalid body' }, { status: 400 }); }
+      if (!body || typeof body.object_id !== 'string' || !/^[a-f0-9]{64}$/i.test(body.object_id))
+        return Response.json({ error: 'invalid object id' }, { status: 400 });
+      let objectId;
+      try { objectId = env.PAIRING.idFromString(body.object_id); }
+      catch { return Response.json({ error: 'invalid object id' }, { status: 400 }); }
+      return env.PAIRING.get(objectId).fetch('https://internal/__maintenance-touch', { method: 'POST' });
+    }
 
     if (url.pathname === '/') {
       return new Response('<h3>NextNotif relay running</h3>', {

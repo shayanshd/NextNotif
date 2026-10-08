@@ -38,6 +38,20 @@ export class SecurityStoreTest extends DurableObject {
 export class SecurityHttpTest extends RelayPairing {
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path === '/seed-maintenance') {
+      const old = Date.now() - Math.max(QUEUE_RETENTION_MS, SMS_RETENTION_MS, CALL_RETENTION_MS) - 1000;
+      await this.ctx.storage.put({
+        queue: JSON.stringify([{ ts: old, event_id: 'expired-maintenance', out: 'private fixture content' }]),
+        smsCommands: [{ id: 'expired-maintenance', created_at: old, body: 'private fixture content' }],
+      });
+      return Response.json({ ok: true });
+    }
+    if (path === '/assert-maintained') {
+      assert(await this.ctx.storage.get('queue') == null);
+      assert((await this.ctx.storage.get('smsCommands')).length === 0);
+      assert(await this.ctx.storage.getAlarm() == null);
+      return Response.json({ ok: true });
+    }
     if (path === '/run-legacy-migration') {
       // Simulate the persisted KV layout of an older production pairing. The
       // updated Worker must preserve its client path while pruning old data.
@@ -181,6 +195,23 @@ export class SecurityHttpTest extends RelayPairing {
 }
 export default {
   async fetch(request, env) {
+    if (new URL(request.url).pathname === '/maintenance-route-test') {
+      const objectId = env.SECURITY_HTTP.idFromName('legacy-migration-fixture');
+      const object = env.SECURITY_HTTP.get(objectId);
+      assert((await object.fetch('http://local/seed-maintenance')).status === 200);
+      const binding = { PAIRING: env.SECURITY_HTTP, NEXTNOTIF_MAINTENANCE_TOKEN: 'local-fixture-maintenance-secret-123456' };
+      const maintenance = (token, object_id) => relay.fetch(new Request('http://local/__maintenance/touch', {
+        method: 'POST', headers: { 'X-NextNotif-Maintenance-Token': token },
+        body: JSON.stringify({ object_id }),
+      }), binding);
+      assert((await maintenance('', objectId.toString())).status === 401);
+      assert((await maintenance('wrong', objectId.toString())).status === 401);
+      assert((await maintenance(binding.NEXTNOTIF_MAINTENANCE_TOKEN, '0'.repeat(64))).status === 400);
+      const result = await maintenance(binding.NEXTNOTIF_MAINTENANCE_TOKEN, objectId.toString());
+      assert(result.status === 200 && (await result.json()).ok === true);
+      assert((await object.fetch('http://local/assert-maintained')).status === 200);
+      return Response.json({ ok: true, checks: 'maintenance token denial, ID validation, expired legacy data purge' });
+    }
     if (new URL(request.url).pathname === '/legacy-migration-test') {
       const object = env.SECURITY_HTTP.get(env.SECURITY_HTTP.idFromName('legacy-migration-fixture'));
       return object.fetch('http://local/run-legacy-migration');
