@@ -1,6 +1,6 @@
 # Private MVP release notes — draft
 
-Status: **draft, not approved for installation or distribution** (2026-10-07).
+Status: **draft, not approved for installation or distribution** (2026-10-08).
 
 ## Included
 
