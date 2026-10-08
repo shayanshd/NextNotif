@@ -29,8 +29,8 @@ android {
         // the ordinary private release and future public release stay at API 26.
         minSdk = if (compatibilityTestMinSdk == "25") 25 else 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0-private-mvp"
+        versionCode = 3
+        versionName = "1.0-private-mvp-full"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

@@ -5,9 +5,10 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CallEventFreshnessTest {
-    @Test fun privateReceiverBuildCannotOfferLiveCallActions() {
+    @Test fun privateReceiverBuildCanAnswerLiveCalls() {
         if (BuildConfig.BUILD_TYPE == "htcReceiver") {
-            assertFalse(Config.LIVE_CALL_BETA_ENABLED)
+            assertTrue(Config.LIVE_CALL_BETA_ENABLED)
+            assertFalse(liveCallEnabledFor(Role.RECEIVER, requested = true))
         }
     }
 
