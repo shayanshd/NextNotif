@@ -72,7 +72,10 @@ jobs:
           test -n "$RELEASE_APK" && test -n "$HTC_APK"
           "$AAPT" dump badging "$RELEASE_APK" | grep -F "sdkVersion:'26'"
           "$AAPT" dump badging "$HTC_APK" | grep -F "sdkVersion:'25'"
-          if "$AAPT" dump permissions "$HTC_APK" | grep -E 'android.permission.(RECEIVE_SMS|SEND_SMS|READ_SMS|READ_PHONE_STATE|READ_CONTACTS|ANSWER_PHONE_CALLS|CALL_PHONE|RECORD_AUDIO)'; then
+          "$AAPT" dump permissions "$RELEASE_APK" | grep -F "uses-permission: name='android.permission.RECORD_AUDIO'"
+          "$AAPT" dump permissions "$RELEASE_APK" | grep -F "uses-permission: name='android.permission.CAPTURE_AUDIO_OUTPUT'"
+          "$AAPT" dump permissions "$HTC_APK" | grep -F "uses-permission: name='android.permission.RECORD_AUDIO'"
+          if "$AAPT" dump permissions "$HTC_APK" | grep -E 'android.permission.(RECEIVE_SMS|SEND_SMS|READ_SMS|READ_PHONE_STATE|READ_CONTACTS|ANSWER_PHONE_CALLS|CALL_PHONE|CAPTURE_AUDIO_OUTPUT|MODIFY_AUDIO_ROUTING)'; then
             echo 'HTC receiver APK includes a gateway permission' >&2
             exit 1
           fi
