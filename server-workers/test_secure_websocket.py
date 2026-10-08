@@ -14,7 +14,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-import websockets
+if os.environ.get("NEXTNOTIF_SECURITY_RETIRE_TEST") != "1":
+    import websockets
 
 
 HERE = Path(__file__).resolve().parent
@@ -22,7 +23,8 @@ PORT = 8788
 BASE = f"http://127.0.0.1:{PORT}"
 HEADER_KEY = (
     "additional_headers"
-    if "additional_headers" in inspect.signature(websockets.connect).parameters
+    if os.environ.get("NEXTNOTIF_SECURITY_RETIRE_TEST") == "1"
+    or "additional_headers" in inspect.signature(websockets.connect).parameters
     else "extra_headers"
 )
 
@@ -190,9 +192,13 @@ def main():
                 time.sleep(0.2)
         else:
             raise RuntimeError("local Wrangler process did not open its port")
-        runtime_checks()
-        asyncio.run(test())
-        asyncio.run(test_durable_ws_replay())
+        if os.environ.get("NEXTNOTIF_SECURITY_RETIRE_TEST") == "1":
+            with urllib.request.urlopen(BASE + "/legacy-retirement-test", timeout=15) as response:
+                assert response.status == 200 and json.load(response)["ok"] is True
+        else:
+            runtime_checks()
+            asyncio.run(test())
+            asyncio.run(test_durable_ws_replay())
     finally:
         proc.terminate()
         try:

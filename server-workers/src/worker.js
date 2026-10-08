@@ -180,7 +180,8 @@ export class RelayPairing extends DurableObject {
   async securityMode() {
     const values = await this.state.storage.get(['securityMode', 'secureRecord']);
     const mode = values.get('securityMode');
-    if ((mode == null || mode === 'legacy') && values.get('secureRecord') == null) return 'legacy';
+    if ((mode == null || mode === 'legacy') && values.get('secureRecord') == null)
+      return this.env.NEXTNOTIF_DISABLE_LEGACY === 'true' ? 'quarantined' : 'legacy';
     if (mode === 'invite_v1' && values.get('secureRecord') != null) return 'invite_v1';
     return 'quarantined';
   }
@@ -1247,6 +1248,8 @@ export default {
     }
 
     if (parts.length === 2 && parts[0] === 'pair' && parts[1] === 'create' && request.method === 'POST') {
+      if (env.NEXTNOTIF_DISABLE_LEGACY === 'true')
+        return Response.json({ error: 'legacy pairing retired' }, { status: 410 });
       for (let i = 0; i < 20; i++) {
         const code = randomPairingCode();
         const inst = env.PAIRING.get(env.PAIRING.idFromName(code));

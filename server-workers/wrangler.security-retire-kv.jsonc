@@ -1,0 +1,15 @@
+{
+  "name": "nextnotif-security-retire-local-kv-test",
+  "main": "security-test-worker.mjs",
+  "compatibility_date": "2026-09-12",
+  "vars": { "NEXTNOTIF_DISABLE_LEGACY": "true" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SECURITY_TEST", "class_name": "SecurityStoreTest" },
+      { "name": "SECURITY_HTTP", "class_name": "SecurityHttpTest" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_classes": ["SecurityStoreTest", "SecurityHttpTest"] }
+  ]
+}

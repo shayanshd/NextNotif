@@ -47,6 +47,7 @@ jobs:
           npm install --prefix server-workers --no-save wrangler@4.131.1
           NEXTNOTIF_WRANGLER="$PWD/server-workers/node_modules/.bin/wrangler" python server-workers/test_secure_websocket.py
           NEXTNOTIF_WRANGLER="$PWD/server-workers/node_modules/.bin/wrangler" NEXTNOTIF_SECURITY_TEST_CONFIG=wrangler.security-test-kv.jsonc python server-workers/test_secure_websocket.py
+          NEXTNOTIF_WRANGLER="$PWD/server-workers/node_modules/.bin/wrangler" NEXTNOTIF_SECURITY_TEST_CONFIG=wrangler.security-retire-kv.jsonc NEXTNOTIF_SECURITY_RETIRE_TEST=1 python server-workers/test_secure_websocket.py
 
   android:
     name: Android build + tests

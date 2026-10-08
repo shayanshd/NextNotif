@@ -89,6 +89,26 @@ export class SecurityHttpTest extends RelayPairing {
       assert(await this.securityMode() === 'legacy');
       return Response.json({ ok: true, checks: 'legacy KV status, expired queue pruning, send/drain compatibility, secure namespace isolation' });
     }
+    if (path === '/run-legacy-retirement') {
+      await this.ctx.storage.put({ paired: '1', tokens: JSON.stringify(['old-local-token']) });
+      assert(await this.securityMode() === 'quarantined');
+      const status = await super.fetch(new Request('http://local/status/123456'));
+      assert(status.status === 401);
+      const send = await super.fetch(new Request('http://local/send/123456', {
+        method: 'POST', body: JSON.stringify({ type: 'relay_test', data: { marker: 'denied' } }),
+      }));
+      assert(send.status === 401);
+      const fetch = await super.fetch(new Request('http://local/fetch/123456', {
+        method: 'POST', headers: { 'X-NextNotif-Token': 'old-local-token' }, body: '{}',
+      }));
+      assert(fetch.status === 401);
+      const socket = await super.fetch(new Request('http://local/ws/receiver/123456', {
+        headers: { Upgrade: 'websocket', 'X-NextNotif-Token': 'old-local-token' },
+      }));
+      assert(socket.status === 401);
+      assert(await this.tryClaim() === false);
+      return Response.json({ ok: true });
+    }
     if (path === '/assert-queued-alarm') {
       assert((await this.getQueue()).length === 1);
       assert((await this.ctx.storage.getAlarm()) != null);
@@ -195,6 +215,12 @@ export class SecurityHttpTest extends RelayPairing {
 }
 export default {
   async fetch(request, env) {
+    if (new URL(request.url).pathname === '/legacy-retirement-test') {
+      const created = await relay.fetch(new Request('http://local/pair/create', { method: 'POST' }), env);
+      assert(created.status === 410);
+      const object = env.SECURITY_HTTP.get(env.SECURITY_HTTP.idFromName('legacy-retirement-fixture'));
+      return object.fetch('http://local/run-legacy-retirement');
+    }
     if (new URL(request.url).pathname === '/maintenance-route-test') {
       const objectId = env.SECURITY_HTTP.idFromName('legacy-migration-fixture');
       const object = env.SECURITY_HTTP.get(objectId);
