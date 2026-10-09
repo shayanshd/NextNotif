@@ -49,6 +49,7 @@ class RelayForegroundService : Service() {
         const val ACTION_FORWARD_CALL = "com.nextnotif.app.FORWARD_CALL"
         const val ACTION_ANSWER_RELAY_CALL = "com.nextnotif.app.ANSWER_RELAY_CALL"
         const val ACTION_END_RELAY_CALL = "com.nextnotif.app.END_RELAY_CALL"
+        const val ACTION_CANCEL_OUTGOING_CALL = "com.nextnotif.app.CANCEL_OUTGOING_CALL"
         const val ACTION_BEGIN_OUTGOING_CALL = "com.nextnotif.app.BEGIN_OUTGOING_CALL"
         const val ACTION_PLACE_OUTGOING_CALL = "com.nextnotif.app.PLACE_OUTGOING_CALL"
         private const val TAG = "RelayService"
@@ -75,6 +76,7 @@ class RelayForegroundService : Service() {
     // Per-pairing reconnect jobs — cancelling one does not affect the others.
     private val reconnectJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val answerRetryJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+    private val temporaryHandshakeJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val unansweredCallJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val reconnectTimeoutJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val sessionTimeoutJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
@@ -219,6 +221,10 @@ class RelayForegroundService : Service() {
             ACTION_END_RELAY_CALL -> {
                 intent.getStringExtra("code")?.let(::endRelayCall)
             }
+            ACTION_CANCEL_OUTGOING_CALL -> cancelOutgoingCall(
+                intent.getStringExtra("code") ?: return START_STICKY,
+                intent.getStringExtra("request_id") ?: return START_STICKY,
+            )
             ACTION_BEGIN_OUTGOING_CALL -> beginOutgoingCall(
                 intent.getStringExtra("code") ?: return START_STICKY,
                 intent.getStringExtra("request_id") ?: return START_STICKY,
@@ -389,6 +395,7 @@ class RelayForegroundService : Service() {
     private fun handleSocketEvent(pairing: PairingInfo, s: RelaySocket?, evt: RelaySocket.Event) {
         when (evt) {
             is RelaySocket.Event.Open -> {
+                temporaryHandshakeJobs.remove(pairing.code)?.cancel()
                 reconnectJobs.remove(pairing.code)?.cancel()
                 reconnectAttempts.remove(pairing.code)
                 // My socket being open means THIS phone is connected; the
@@ -431,7 +438,7 @@ class RelayForegroundService : Service() {
                     }
                 }
             }
-            is RelaySocket.Event.AuthOk -> saveDeviceToken(pairing.code, evt.deviceToken)
+            is RelaySocket.Event.AuthOk -> if (evt.deviceToken.isNotEmpty()) saveDeviceToken(pairing.code, evt.deviceToken)
             is RelaySocket.Event.Closed -> {
                 if (activeCallCode == pairing.code) pauseCallForReconnect(pairing.code, evt.reason)
                 AppState.setConnState(pairing.code, AppState.ConnState.DISCONNECTED)
@@ -978,6 +985,14 @@ class RelayForegroundService : Service() {
     }
 
     private fun endRelayCall(code: String) {
+        // A temporary FCM call socket may be unauthenticated when the user taps
+        // End. Persist an authenticated HTTPS cancel before local teardown so
+        // the sender can still hang up after this receiver socket closes.
+        val pairing = SessionStore.load(this).pairings.firstOrNull { it.code == code }
+        val requestId = outgoingCallRequestId ?: OutgoingCallRequestStore.current(this, code)
+        if (pairing?.role == Role.RECEIVER && requestId != null) {
+            OutgoingCallRelay.enqueueCancel(this, code, requestId)
+        }
         sockets[code]?.send("call_control", JSONObject().put("action", "end").apply {
             callPeerSession?.let { put("session_id", it) }
         })
@@ -1083,29 +1098,13 @@ class RelayForegroundService : Service() {
                 startCallBridge(pairing)
             }
             "end" -> if (pairing.role == Role.SENDER) {
-                if (Build.VERSION.SDK_INT >= 28) {
-                    if (!canControlPhoneCalls()) {
-                        sockets[code]?.send(
-                            "call_control",
-                            JSONObject().put("action", "error")
-                                .put("message", "Allow phone answering on the sender to hang up remotely"),
-                        )
-                        return
-                    }
-                    runCatching { (getSystemService(Context.TELECOM_SERVICE) as TelecomManager).endCall() }
-                } else {
-                    // TelecomManager.endCall() is API 28+. The rooted Android
-                    // 8 gateway can still issue the standard end-call key.
-                    val hungUp = runCatching {
-                        BoundedCommand.successful(ProcessBuilder("su", "-c", "input keyevent 6").start(), 5_000)
-                    }.getOrDefault(false)
-                    if (!hungUp) {
-                        val message = "Could not confirm remote hang-up. End the call on the sender phone."
-                        sockets[code]?.send("call_control", JSONObject().put("action", "error").put("message", message))
-                        completeLiveCall(code, "remote_hangup_failed", message)
-                        return
-                    }
+                if (!endSenderCellularCall()) {
+                    val message = "Could not confirm remote hang-up. End the call on the sender phone."
+                    sockets[code]?.send("call_control", JSONObject().put("action", "error").put("message", message))
+                    completeLiveCall(code, "remote_hangup_failed", message)
+                    return
                 }
+                outgoingCallRequestId?.let { reportOutgoingCall(code, it, "ended") }
                 completeLiveCall(code, "remote_hangup")
             }
             "ended" -> {
@@ -1117,6 +1116,32 @@ class RelayForegroundService : Service() {
                 completeLiveCall(code, "remote_error", message)
             }
         }
+    }
+
+    @SuppressLint("MissingPermission") // canControlPhoneCalls() guards API 28+; the rooted key path is API 26.
+    private fun endSenderCellularCall(): Boolean = if (Build.VERSION.SDK_INT >= 28) {
+        canControlPhoneCalls() && runCatching {
+            (getSystemService(Context.TELECOM_SERVICE) as TelecomManager).endCall()
+        }.getOrDefault(false)
+    } else {
+        // TelecomManager.endCall() is API 28+. The rooted Android 8 sender
+        // uses the native end-call key even while the call is still dialing.
+        runCatching {
+            BoundedCommand.successful(ProcessBuilder("su", "-c", "input keyevent 6").start(), 5_000)
+        }.getOrDefault(false)
+    }
+
+    @Synchronized
+    private fun cancelOutgoingCall(code: String, requestId: String) {
+        // The durable cancel may arrive after a new call started. Never end an
+        // unrelated cellular call or another pairing's request.
+        if (activeCallCode != code || outgoingCallRequestId != requestId) return
+        if (!endSenderCellularCall()) {
+            AppState.setError("Could not end the cellular call remotely. End it on the sender phone.")
+            return
+        }
+        reportOutgoingCall(code, requestId, "ended")
+        completeLiveCall(code, "remote_hangup")
     }
 
     private fun canControlPhoneCalls(): Boolean =
@@ -1531,6 +1556,8 @@ class RelayForegroundService : Service() {
         reconnectJobs.clear()
         answerRetryJobs.values.forEach { it.cancel() }
         answerRetryJobs.clear()
+        temporaryHandshakeJobs.values.forEach { it.cancel() }
+        temporaryHandshakeJobs.clear()
         reconnectAttempts.clear()
         temporaryCallSockets.clear()
         for ((_, s) in sockets) s.close()
@@ -1644,6 +1671,25 @@ class RelayForegroundService : Service() {
             }
         }
         if (sockets[pairing.code]?.isOpen != true) connect(pairing)
+        temporaryHandshakeJobs.remove(pairing.code)?.cancel()
+        val candidate = sockets[pairing.code]
+        if (candidate != null && !candidate.isAuthenticated) {
+            temporaryHandshakeJobs[pairing.code] = scope.launch {
+                delay(6_000L)
+                synchronized(this@RelayForegroundService) {
+                    if (temporaryCallSockets.contains(pairing.code) &&
+                        activeCallCode == pairing.code &&
+                        sockets[pairing.code] === candidate && !candidate.isAuthenticated
+                    ) {
+                        Log.w(TAG, "temporary call handshake stalled; reconnecting")
+                        sockets.remove(pairing.code)
+                        candidate.close()
+                        connect(pairing)
+                        openTemporaryCallSocket(pairing)
+                    }
+                }
+            }
+        }
         AppState.push("CALL", "temporary call connection opening", pairing.code)
     }
 
@@ -1669,6 +1715,7 @@ class RelayForegroundService : Service() {
 
     private fun closeTemporaryCallSocket(code: String) {
         if (!temporaryCallSockets.remove(code)) return
+        temporaryHandshakeJobs.remove(code)?.cancel()
         reconnectJobs.remove(code)?.cancel()
         answerRetryJobs.remove(code)?.cancel()
         reconnectAttempts.remove(code)
@@ -1768,6 +1815,10 @@ class RelayForegroundService : Service() {
 
         fun endCall(ctx: Context, code: String) {
             start(ctx, ACTION_END_RELAY_CALL, arrayOf("code" to code))
+        }
+
+        fun cancelOutgoingCall(ctx: Context, code: String, requestId: String) {
+            start(ctx, ACTION_CANCEL_OUTGOING_CALL, arrayOf("code" to code, "request_id" to requestId))
         }
 
         fun beginOutgoingCall(ctx: Context, code: String, requestId: String, number: String) {

@@ -202,6 +202,10 @@
     <string name="detail_relay_test_success">Sent — check the receiver phone.</string>
     <string name="detail_relay_test_failure">Couldn’t send: %1$s</string>
     <string name="detail_relay_test_disabled">Start this pairing before running the test.</string>
+    <string name="detail_call_connection_body">Check the secure call connection without dialing or sending an SMS. This does not test audio.</string>
+    <string name="detail_call_connection_action">Test call connection</string>
+    <string name="detail_call_connection_testing">Checking connection…</string>
+    <string name="detail_call_connection_success">Secure call connection authenticated. Call audio remains untested.</string>
 
     <string name="add_title">Add pairing</string>
     <string name="edit_title">Edit pairing</string>

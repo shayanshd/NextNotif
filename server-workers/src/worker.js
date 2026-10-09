@@ -429,7 +429,7 @@ export class RelayPairing extends DurableObject {
   // data-only lets the app re-arm its relay immediately, drain the queue, and
   // display the event through its normal notification path. Rate-limited per
   // pairing/role. Never throws into the relay path.
-  async maybeFcmWake(role, evt) {
+  async maybeFcmWake(role, evt, force = false) {
     try {
       const saRaw = this.env.FCM_SERVICE_ACCOUNT;
       if (typeof saRaw !== 'string' || saRaw.length === 0) return;
@@ -442,7 +442,7 @@ export class RelayPairing extends DurableObject {
       // A persistent WebSocket needs only one wake to reconnect and drain its
       // queue. An on-demand receiver has no socket, so every user-visible
       // event needs its own FCM delivery.
-      if (!onDemand && now - last < FCM_WAKE_COOLDOWN_MS) return;
+      if (!force && !onDemand && now - last < FCM_WAKE_COOLDOWN_MS) return;
       const sa = JSON.parse(saRaw);
       const bearer = await this.fcmAccessToken(sa);
       const base = (this.env.FCM_SEND_URL || 'https://fcm.googleapis.com').replace(/\/$/, '');
@@ -731,14 +731,26 @@ export class RelayPairing extends DurableObject {
       }
       if (operation === 'call-result' && !updateCall(records, body))
         return Response.json({error: 'invalid result'}, {status: 400});
-      if (operation === 'call-cancel') cancelActiveCalls(records, body?.reason || 'Receiver started a new call');
+      if (operation === 'call-cancel') {
+        if (body?.id != null && (typeof body.id !== 'string' || !/^[a-f0-9-]{36}$/.test(body.id)))
+          return Response.json({error: 'invalid call id'}, {status: 400});
+        cancelActiveCalls(records, body?.reason || 'Receiver ended the call', body?.id ?? null);
+      }
       await this.putCommandRecords('callCommands', records);
       if (operation === 'call-result' || operation === 'call-cancel') {
         this.signalSmsSync('receiver', 'call_sync');
         this.state.waitUntil(this.maybeFcmWake('receiver', {type: 'call_status'}));
+        if (operation === 'call-cancel') {
+          this.signalSmsSync('sender', 'call_sync');
+          this.state.waitUntil(this.maybeFcmWake('sender', {type: 'call_cancel'}, true));
+        }
         return Response.json({ok: true});
       }
-      return Response.json({commands: operation === 'call-fetch' ? records.filter(x => x.status === 'queued') : records});
+      const cancellationAware = request.headers.get('X-NextNotif-Call-Cancel') === '1';
+      return Response.json({commands: operation === 'call-fetch' ? records.filter(x =>
+        x.status === 'queued' || cancellationAware && x.status === 'ended' &&
+          Number.isSafeInteger(x.cancel_requested_at) && x.cancel_requested_at > Date.now() - 600000
+      ) : records});
     }
 
     if (operation === 'ice' && request.method === 'POST' && parts.length === 2 && isValidCode(parts[1])) {

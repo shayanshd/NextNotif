@@ -46,10 +46,11 @@ internal object OutgoingCallRelay {
     private fun post(pairing: PairingInfo, path: String, body: JSONObject): JSONObject {
         val base = pairing.server.trimEnd('/').replaceFirst("ws://", "http://").replaceFirst("wss://", "https://")
         requireNotNull(pairing.deviceToken)
-        val request = Request.Builder().url("$base/$path").header("X-NextNotif-Code", pairing.code)
+        val builder = Request.Builder().url("$base/$path").header("X-NextNotif-Code", pairing.code)
             .header("X-NextNotif-Role", pairing.role.name.lowercase())
             .pairingAuth(pairing)
-            .post(body.toString().toRequestBody(json)).build()
+        if (path == "call-fetch") builder.header("X-NextNotif-Call-Cancel", "1")
+        val request = builder.post(body.toString().toRequestBody(json)).build()
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) error("Call relay HTTP ${response.code}")
             JSONObject(response.body?.string().orEmpty())
@@ -66,6 +67,24 @@ internal object OutgoingCallRelay {
 
     fun handlePush(context: Context, data: Map<String, String>) {
         data["code"]?.let { enqueue(context, it) }
+    }
+
+    fun enqueueCancel(context: Context, code: String, requestId: String) {
+        val work = OneTimeWorkRequestBuilder<OutgoingCallCancelWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS)
+            .setInputData(workDataOf("code" to code, "request_id" to requestId)).build()
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "call-cancel-$code-$requestId", ExistingWorkPolicy.KEEP, work)
+    }
+
+    suspend fun cancel(context: Context, code: String, requestId: String): Boolean = withContext(Dispatchers.IO) {
+        val pairing = SessionStore.load(context).pairings.firstOrNull {
+            it.code == code && it.role == Role.RECEIVER && it.enabled && !it.isFirebase
+        } ?: return@withContext true
+        post(pairing, "call-cancel", JSONObject().put("id", requestId)
+            .put("reason", "Receiver ended the call"))
+        true
     }
 
     suspend fun submit(context: Context, pairing: PairingInfo, number: String, subscriptionId: Int?): String = withContext(Dispatchers.IO) {
@@ -109,8 +128,13 @@ internal object OutgoingCallRelay {
             val commands = post(pairing, "call-fetch", JSONObject()).getJSONArray("commands")
             for (i in 0 until commands.length()) {
                 val c = commands.getJSONObject(i)
-                RelayForegroundService.Controller.placeOutgoingCall(context, pairing.code, c.getString("id"),
-                    c.getString("to"), smsSubscription(c))
+                when {
+                    c.optString("status") == "queued" ->
+                        RelayForegroundService.Controller.placeOutgoingCall(context, pairing.code, c.getString("id"),
+                            c.getString("to"), smsSubscription(c))
+                    c.optString("status") == "ended" && c.optLong("cancel_requested_at") > 0L ->
+                        RelayForegroundService.Controller.cancelOutgoingCall(context, pairing.code, c.getString("id"))
+                }
             }
         } else {
             val commands = post(pairing, "call-status", JSONObject()).getJSONArray("commands")
@@ -141,6 +165,16 @@ class OutgoingCallSyncWorker(context: Context, params: WorkerParameters) : Corou
         val code = inputData.getString("code") ?: return Result.failure()
         return try {
             if (OutgoingCallRelay.sync(applicationContext, code)) Result.success() else Result.retry()
+        } catch (_: Exception) { Result.retry() }
+    }
+}
+
+class OutgoingCallCancelWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result {
+        val code = inputData.getString("code") ?: return Result.failure()
+        val requestId = inputData.getString("request_id") ?: return Result.failure()
+        return try {
+            if (OutgoingCallRelay.cancel(applicationContext, code, requestId)) Result.success() else Result.retry()
         } catch (_: Exception) { Result.retry() }
     }
 }

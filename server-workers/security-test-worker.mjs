@@ -200,6 +200,17 @@ export class SecurityHttpTest extends RelayPairing {
     await this.alarm();
     assert(await this.ctx.storage.get('queue') == null);
     assert(await this.ctx.storage.getAlarm() === null);
+    const callId = '00000000-0000-4000-8000-000000000099';
+    assert((await call('call-submit', receiver, {id: callId, to: '+15551234567', created_at: Date.now()})).status === 200);
+    assert(((await (await call('call-fetch', sender)).json()).commands).length === 1);
+    assert((await call('call-result', sender, {id: callId, status: 'dialing'})).status === 200);
+    assert((await call('call-cancel', receiver, {id: callId, reason: 'Receiver ended the call'})).status === 200);
+    assert(((await (await call('call-fetch', sender)).json()).commands).length === 0);
+    const cancelled = (await (await call('call-fetch', sender, {}, {'X-NextNotif-Call-Cancel': '1'})).json()).commands;
+    assert(cancelled.length === 1 && cancelled[0].id === callId && cancelled[0].status === 'ended' &&
+      Number.isSafeInteger(cancelled[0].cancel_requested_at));
+    assert((await call('call-result', sender, {id: callId, status: 'dialing'})).status === 200);
+    assert(((await (await call('call-status', receiver)).json()).commands).find(x => x.id === callId).status === 'ended');
     // A secure socket without device credentials must be denied before any
     // slot replacement or metadata mutation.
     const ws = await super.fetch(new Request('http://local/ws/receiver/123456', { headers: { Upgrade: 'websocket' } }));

@@ -92,6 +92,8 @@ fun PairingDetailScreen(
     var showEntry by remember { mutableStateOf<AppState.Entry?>(null) }
     var relayTestState by remember(pairing.code) { mutableStateOf<RelaySelfTest.Result?>(null) }
     var relayTestRunning by remember(pairing.code) { mutableStateOf(false) }
+    var callTestState by remember(pairing.code) { mutableStateOf<CallSignalingSelfTest.Result?>(null) }
+    var callTestRunning by remember(pairing.code) { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -350,6 +352,45 @@ fun PairingDetailScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                            }
+                            if (CallSignalingSelfTest.canRun(pairing)) {
+                                Text(
+                                    stringResource(R.string.detail_call_connection_body),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        callTestRunning = true
+                                        callTestState = null
+                                        scope.launch {
+                                            callTestState = CallSignalingSelfTest.run(context, pairing)
+                                            callTestRunning = false
+                                        }
+                                    },
+                                    enabled = !callTestRunning,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    if (callTestRunning) {
+                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                        Spacer(Modifier.width(8.dp))
+                                    }
+                                    Text(stringResource(if (callTestRunning) R.string.detail_call_connection_testing
+                                        else R.string.detail_call_connection_action))
+                                }
+                                callTestState?.let { result ->
+                                    val success = result is CallSignalingSelfTest.Result.Success
+                                    Text(
+                                        when (result) {
+                                            is CallSignalingSelfTest.Result.Success ->
+                                                stringResource(R.string.detail_call_connection_success)
+                                            is CallSignalingSelfTest.Result.Failure -> result.message
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (success) MaterialTheme.colorScheme.onSurface
+                                            else MaterialTheme.colorScheme.error,
+                                    )
+                                }
                             }
                         }
                     }

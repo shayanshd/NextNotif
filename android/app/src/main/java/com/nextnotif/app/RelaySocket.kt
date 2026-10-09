@@ -141,7 +141,7 @@ class RelaySocket(
                     if (type == "auth_ok") {
                         if (fcmOnDemand) Log.i(TAG, "temporary call auth accepted role=${role.name}")
                         val dt = obj.optString("device_token", "")
-                        if (dt.isNotEmpty()) onEvent(Event.AuthOk(dt))
+                        onEvent(Event.AuthOk(dt))
                         return@runCatching
                     }
                     val data = obj.optJSONObject("data") ?: JSONObject()
