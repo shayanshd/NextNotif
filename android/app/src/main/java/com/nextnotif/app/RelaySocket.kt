@@ -98,6 +98,7 @@ class RelaySocket(
         ws = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 isOpen = true
+                if (fcmOnDemand) Log.i(TAG, "temporary call transport opened role=${role.name}")
                 // Open the handshake; advertise this device's name so the
                 // partner's UI can label the peer ("Xiaomi 23049PCD8G").
                 webSocket.send(
@@ -117,6 +118,7 @@ class RelaySocket(
                     val obj = JSONObject(text)
                     val type = obj.optString("type", "unknown")
                     if (type == "handshake") {
+                        if (fcmOnDemand) Log.i(TAG, "temporary call challenge received role=${role.name}")
                         val token = obj.optString("token", "")
                         val auth = JSONObject().apply {
                             put("type", "auth")
@@ -137,6 +139,7 @@ class RelaySocket(
                     }
                     if (type == "auth") return@runCatching
                     if (type == "auth_ok") {
+                        if (fcmOnDemand) Log.i(TAG, "temporary call auth accepted role=${role.name}")
                         val dt = obj.optString("device_token", "")
                         if (dt.isNotEmpty()) onEvent(Event.AuthOk(dt))
                         return@runCatching
@@ -164,6 +167,7 @@ class RelaySocket(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 isOpen = false
                 isAuthenticated = false
+                if (fcmOnDemand) Log.w(TAG, "temporary call transport failed role=${role.name} kind=${t.javaClass.simpleName}")
                 onEvent(Event.Failure(t.message ?: "unknown"))
             }
         })

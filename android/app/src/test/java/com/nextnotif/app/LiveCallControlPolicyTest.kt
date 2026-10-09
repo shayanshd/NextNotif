@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LiveCallControlPolicyTest {
+    @Test fun onDemandSenderWaitsForAuthenticatedCallSocket() {
+        assertFalse(LiveCallControlPolicy.senderBridgeCanStart(true, false))
+        assertTrue(LiveCallControlPolicy.senderBridgeCanStart(true, true))
+        assertTrue(LiveCallControlPolicy.senderBridgeCanStart(false, false))
+    }
+
     @Test fun supersededSocketsKeepHistoryButNeverCallControls() {
         assertFalse(LiveCallControlPolicy.acceptSocketEvent(false, "call_control"))
         assertFalse(LiveCallControlPolicy.acceptSocketEvent(false, null))

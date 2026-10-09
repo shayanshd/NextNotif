@@ -1207,6 +1207,23 @@ class RelayForegroundService : Service() {
     @Synchronized
     private fun startCallBridge(pairing: PairingInfo, provisionedIce: List<org.webrtc.PeerConnection.IceServer>? = null) {
         if (callAudioBridge != null || activeCallCode != pairing.code) return
+        // The cellular radio may reach OFFHOOK before the temporary FCM call
+        // socket finishes its handshake. Starting the peer at that point loses
+        // its first "connected"/SDP signals. The socket's Open event calls
+        // this method again once authentication is ready.
+        if (pairing.role == Role.SENDER && !LiveCallControlPolicy.senderBridgeCanStart(
+                pairing.isFcmOnDemand, sockets[pairing.code]?.isAuthenticated == true)) {
+            if (!reconnectTimeoutJobs.containsKey(pairing.code)) reconnectTimeoutJobs[pairing.code] = scope.launch {
+                delay(callTimeouts.rendezvousMs)
+                synchronized(this@RelayForegroundService) {
+                    if (activeCallCode == pairing.code) completeLiveCall(pairing.code,
+                        if (callAudioBridge == null) "signaling_timeout" else "negotiation_timeout",
+                        "Could not connect call signaling and audio")
+                }
+            }
+            AppState.updateCall(pairing.code, AppState.CallPhase.CONNECTING, "Waiting for secure call signaling")
+            return
+        }
         if (pairing.role == Role.SENDER) {
             liveCallDenial(pairing)?.let { message ->
                 sockets[pairing.code]?.send(

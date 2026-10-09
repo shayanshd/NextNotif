@@ -2,6 +2,9 @@ package com.nextnotif.app
 
 /** Ephemeral controls cannot inherit durable history's stale-delivery exception. */
 internal object LiveCallControlPolicy {
+    fun senderBridgeCanStart(fcmOnDemand: Boolean, socketAuthenticated: Boolean): Boolean =
+        !fcmOnDemand || socketAuthenticated
+
     fun acceptSocketEvent(current: Boolean, incomingType: String?): Boolean =
         current || (incomingType != null && incomingType != "call_control")
 
