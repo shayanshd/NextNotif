@@ -323,7 +323,16 @@ class RelayForegroundService : Service() {
         // FCM senders have no socket handshake carrying battery metadata. Send
         // the first reading as soon as the uplink is ready so a receiver does
         // not wait for the two-minute status poll after startup/reconnect.
-        scope.launch { reportBatteryStatus(pairing) }
+        scope.launch {
+            // DNS and network failures are expected while a gateway moves
+            // between networks. An uncaught exception in this fire-and-forget
+            // coroutine otherwise terminates the entire relay process.
+            try {
+                reportBatteryStatus(pairing)
+            } catch (error: Exception) {
+                Log.w(TAG, "battery report failed: ${error.javaClass.simpleName}")
+            }
+        }
     }
 
     /** Stop one pairing's relay machinery and clear its UI state. */
