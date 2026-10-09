@@ -301,6 +301,9 @@ class RelayForegroundService : Service() {
     }
 
     private fun prepareFcmOnDemand(pairing: PairingInfo) {
+        // Starting the service to process an FCM wake must not close the
+        // temporary socket that is carrying this pairing's live call.
+        if (temporaryCallSockets.contains(pairing.code)) return
         reconnectJobs.remove(pairing.code)?.cancel()
         reconnectAttempts.remove(pairing.code)
         sockets.remove(pairing.code)?.close()
@@ -316,9 +319,14 @@ class RelayForegroundService : Service() {
      * reusable HTTP client and let the cellular radio sleep between events.
      */
     private fun prepareSenderUplink(pairing: PairingInfo) {
-        reconnectJobs.remove(pairing.code)?.cancel()
-        reconnectAttempts.remove(pairing.code)
-        sockets.remove(pairing.code)?.close()
+        // FCM wakes call Controller.start() even if the service is already
+        // running. Rebuilding the ordinary HTTPS uplink during a live call
+        // used to close its temporary WebSocket and strand negotiation.
+        if (!temporaryCallSockets.contains(pairing.code)) {
+            reconnectJobs.remove(pairing.code)?.cancel()
+            reconnectAttempts.remove(pairing.code)
+            sockets.remove(pairing.code)?.close()
+        }
         uplinks.getOrPut(pairing.code) {
             SenderUplink(this, pairing.server, pairing.code, pairing.deviceToken, pairing.deviceId)
         }
