@@ -140,6 +140,13 @@ internal class WebRtcCallPeer(
         track?.setEnabled(microphone.trackEnabled)
     }
 
+    fun setDeviceAudioEnabled(enabled: Boolean) = dispatch {
+        microphone.audioEnabled = enabled
+        track?.setEnabled(microphone.trackEnabled)
+        peer?.setAudioRecording(enabled)
+        peer?.setAudioPlayout(enabled)
+    }
+
     private fun createDescription(offer: Boolean) {
         val callback = sdpObserver(onCreate = { description ->
             check(WebRtcOpusPolicy.continuous(description.description)) { "Continuous Opus is required" }

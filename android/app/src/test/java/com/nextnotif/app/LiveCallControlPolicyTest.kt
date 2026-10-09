@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LiveCallControlPolicyTest {
+    @Test fun carrierDialRequiresBothPeersAndAuthenticatedSocketForSameSession() {
+        val session = "current"
+        assertTrue(LiveCallControlPolicy.outgoingDialReady(session, session, session, true))
+        assertFalse(LiveCallControlPolicy.outgoingDialReady(session, null, session, true))
+        assertFalse(LiveCallControlPolicy.outgoingDialReady(session, session, null, true))
+        assertFalse(LiveCallControlPolicy.outgoingDialReady(session, "old", session, true))
+        assertFalse(LiveCallControlPolicy.outgoingDialReady(session, session, "old", true))
+        assertFalse(LiveCallControlPolicy.outgoingDialReady(session, session, session, false))
+        assertFalse(LiveCallControlPolicy.outgoingDialReady(null, null, null, true))
+    }
     @Test fun onDemandSenderWaitsForAuthenticatedCallSocket() {
         assertFalse(LiveCallControlPolicy.senderBridgeCanStart(true, false))
         assertTrue(LiveCallControlPolicy.senderBridgeCanStart(true, true))

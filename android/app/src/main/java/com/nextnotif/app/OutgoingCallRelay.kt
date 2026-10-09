@@ -142,11 +142,14 @@ internal object OutgoingCallRelay {
             currentOutgoingCallCommand(commands, currentRequest)?.let { c ->
                 when (c.optString("status")) {
                     "failed", "expired" -> {
-                        AppState.finishCall(code, c.optString("detail", "Sender could not place the call"))
+                        val message = c.optString("detail", "Sender could not place the call")
+                        AppState.finishCall(code, message)
+                        RelayForegroundService.Controller.finishOutgoingCall(context, code, currentRequest, message)
                         OutgoingCallRequestStore.clearIfCurrent(context, code, currentRequest)
                     }
                     "ended" -> {
                         AppState.finishCall(code)
+                        RelayForegroundService.Controller.finishOutgoingCall(context, code, currentRequest, null)
                         OutgoingCallRequestStore.clearIfCurrent(context, code, currentRequest)
                     }
                 }

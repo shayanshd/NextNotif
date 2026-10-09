@@ -21,6 +21,7 @@ internal class WebRtcCallAudioBridge(
     private val sessionId: String,
     private val capability: GatewayCapability,
     private val iceServers: List<PeerConnection.IceServer>,
+    private val preDial: Boolean = false,
     private val forceRelay: Boolean = false,
     private val sendSignal: (JSONObject) -> Boolean,
     private val onState: (PeerConnection.PeerConnectionState) -> Unit,
@@ -65,7 +66,7 @@ internal class WebRtcCallAudioBridge(
                 }
                 if (closed.get()) return@execute
                 peer = WebRtcCallPeer(appContext, role, sessionId, capability, iceServers,
-                    forceRelay = forceRelay, initiallyMuted = muted.get(), sendSignal = sendSignal,
+                    forceRelay = forceRelay, audioEnabled = !preDial, initiallyMuted = muted.get(), sendSignal = sendSignal,
                     onState = { state -> callback { onState(state) } },
                     onError = { message -> callback { try { onError(message) } finally { close() } } })
                 peer!!.start()
@@ -87,6 +88,11 @@ internal class WebRtcCallAudioBridge(
         return true
     }
     fun setMuted(value: Boolean) { muted.set(value); if (!closed.get()) peer?.setMuted(value) }
+    /** The sender's transport is negotiated before the cellular call. Start
+     * its device capture/playback only once Android reports OFFHOOK. */
+    fun activateCellularAudio() {
+        if (role == Role.SENDER && preDial && !closed.get()) peer?.setDeviceAudioEnabled(true)
+    }
     fun requestReceivedPackets(onResult: (Long?) -> Unit) {
         if (!closed.get()) peer?.requestReceivedPackets { count -> callback { onResult(count) } }
     }

@@ -5,6 +5,10 @@ internal object LiveCallControlPolicy {
     fun senderBridgeCanStart(fcmOnDemand: Boolean, socketAuthenticated: Boolean): Boolean =
         !fcmOnDemand || socketAuthenticated
 
+    fun outgoingDialReady(session: String?, localReady: String?, remoteReady: String?,
+                          socketAuthenticated: Boolean): Boolean =
+        session != null && localReady == session && remoteReady == session && socketAuthenticated
+
     fun acceptSocketEvent(current: Boolean, incomingType: String?): Boolean =
         current || (incomingType != null && incomingType != "call_control")
 

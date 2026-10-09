@@ -19,4 +19,11 @@ class WebRtcMicrophoneStateTest {
         microphone.muted = false
         assertFalse(microphone.trackEnabled)
     }
+    @Test fun senderCanActivateAudioAfterPreDialConnectionWithoutLosingMute() {
+        val microphone = WebRtcMicrophoneState(audioEnabled = false, muted = true)
+        microphone.audioEnabled = true
+        assertFalse(microphone.trackEnabled)
+        microphone.muted = false
+        assertTrue(microphone.trackEnabled)
+    }
 }

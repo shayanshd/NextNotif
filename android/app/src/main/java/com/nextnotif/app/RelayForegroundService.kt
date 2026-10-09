@@ -50,10 +50,12 @@ class RelayForegroundService : Service() {
         const val ACTION_ANSWER_RELAY_CALL = "com.nextnotif.app.ANSWER_RELAY_CALL"
         const val ACTION_END_RELAY_CALL = "com.nextnotif.app.END_RELAY_CALL"
         const val ACTION_CANCEL_OUTGOING_CALL = "com.nextnotif.app.CANCEL_OUTGOING_CALL"
+        const val ACTION_FINISH_OUTGOING_CALL = "com.nextnotif.app.FINISH_OUTGOING_CALL"
         const val ACTION_BEGIN_OUTGOING_CALL = "com.nextnotif.app.BEGIN_OUTGOING_CALL"
         const val ACTION_PLACE_OUTGOING_CALL = "com.nextnotif.app.PLACE_OUTGOING_CALL"
         private const val TAG = "RelayService"
         private const val BATTERY_REFRESH_MS = 30 * 60_000L
+        private const val PRE_DIAL_TIMEOUT_MS = 30_000L
         private val RECONNECT_DELAYS_MS = longArrayOf(2_000L, 5_000L, 10_000L, 30_000L, 60_000L, 120_000L)
         @Volatile private var serviceRunning = false
     }
@@ -104,6 +106,18 @@ class RelayForegroundService : Service() {
     @Volatile private var activeCallCode: String? = null
     @Volatile private var pendingAnswerCode: String? = null
     @Volatile private var outgoingCallRequestId: String? = null
+    private data class PendingOutgoingDial(
+        val requestId: String,
+        val number: String,
+        val handle: android.telecom.PhoneAccountHandle,
+    )
+    private var pendingOutgoingDial: PendingOutgoingDial? = null
+    private var preDialLocalReadySession: String? = null
+    private var preDialRemoteReadySession: String? = null
+    private var preDialTimeoutJob: Job? = null
+    private var preDialSignalRetryJob: Job? = null
+    private var outgoingCellularConnected = false
+    private var outgoingDialIssued = false
     @Volatile private var callAudioBridge: WebRtcCallAudioBridge? = null
     @Volatile private var callPeerSession: String? = null
     @Volatile private var callPeerReadySession: String? = null
@@ -224,6 +238,11 @@ class RelayForegroundService : Service() {
             ACTION_CANCEL_OUTGOING_CALL -> cancelOutgoingCall(
                 intent.getStringExtra("code") ?: return START_STICKY,
                 intent.getStringExtra("request_id") ?: return START_STICKY,
+            )
+            ACTION_FINISH_OUTGOING_CALL -> finishOutgoingCall(
+                intent.getStringExtra("code") ?: return START_STICKY,
+                intent.getStringExtra("request_id") ?: return START_STICKY,
+                intent.getStringExtra("error"),
             )
             ACTION_BEGIN_OUTGOING_CALL -> beginOutgoingCall(
                 intent.getStringExtra("code") ?: return START_STICKY,
@@ -441,7 +460,8 @@ class RelayForegroundService : Service() {
                             AppState.updateCall(pairing.code, AppState.CallPhase.CONNECTING)
                             s?.send("call_control", JSONObject().put("action", "resume"))
                         }
-                    } else if (lastCallState == TelephonyManager.CALL_STATE_OFFHOOK) {
+                    } else if (pendingOutgoingDial != null ||
+                        lastCallState == TelephonyManager.CALL_STATE_OFFHOOK) {
                         startCallBridge(pairing)
                     }
                 }
@@ -917,6 +937,12 @@ class RelayForegroundService : Service() {
             Contacts.lookupName(this@RelayForegroundService, finalNumber) ?: screenedName
         } else screenedName
         forwardCall(finalNumber, stateStr, System.currentTimeMillis(), name)
+        if (pendingOutgoingDial != null) {
+            if (state != TelephonyManager.CALL_STATE_IDLE) {
+                activeCallCode?.let { completeLiveCall(it, "pre_dial_busy", "Sender phone became busy before dialing") }
+            }
+            return
+        }
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
                 outgoingIdleJob?.cancel()
@@ -931,6 +957,15 @@ class RelayForegroundService : Service() {
                     }
                     if (pairing != null) {
                         startCallBridge(pairing)
+                        if (outgoingCallRequestId != null && pendingOutgoingDial == null &&
+                            preDialLocalReadySession == callPeerSession && callPeerSession != null) {
+                            outgoingCellularConnected = true
+                            callAudioBridge?.activateCellularAudio()
+                            sockets[code]?.send("call_control", JSONObject().put("action", "cellular_connected")
+                                .put("session_id", callPeerSession))
+                            startWebRtcMediaWatchdog(code, callPeerSession!!)
+                            AppState.updateCall(code, AppState.CallPhase.ACTIVE)
+                        }
                     }
                 }
                 // A local answer has no selected relay pairing. If one remote
@@ -1013,6 +1048,8 @@ class RelayForegroundService : Service() {
     private fun handleCallControl(code: String, data: JSONObject) {
         val pairing = SessionStore.load(this).pairings.firstOrNull { it.code == code } ?: return
         val action = data.optString("action")
+        if (pairing.role == Role.RECEIVER && action == "error" && data.has("request_id") &&
+            data.optString("request_id") != outgoingCallRequestId) return
         // A delayed generation-specific error/end cannot terminate its replacement.
         if (!LiveCallControlPolicy.acceptSessionControl(action,
                 if (data.has("session_id")) data.optString("session_id") else null, callPeerSession)) return
@@ -1050,6 +1087,30 @@ class RelayForegroundService : Service() {
             }
         }
         when (action) {
+            "preflight_ready" -> if (pairing.role == Role.SENDER && activeCallCode == code &&
+                pendingOutgoingDial != null && data.optString("session_id") == callPeerSession
+            ) {
+                preDialRemoteReadySession = callPeerSession
+                callPeerSession?.let { dialAfterPreflight(code, it) }
+            }
+            "dialing" -> if (pairing.role == Role.RECEIVER && activeCallCode == code &&
+                outgoingCallRequestId != null && data.optString("session_id") == callPeerSession
+            ) {
+                outgoingDialIssued = true
+                preDialSignalRetryJob?.cancel()
+                preDialSignalRetryJob = null
+                AppState.updateCall(code, AppState.CallPhase.CONNECTING, "Sender is dialing")
+            }
+            "cellular_connected" -> if (pairing.role == Role.RECEIVER && activeCallCode == code &&
+                outgoingCallRequestId != null && data.optString("session_id") == preDialLocalReadySession
+            ) {
+                outgoingCellularConnected = true
+                outgoingDialIssued = true
+                preDialSignalRetryJob?.cancel()
+                preDialSignalRetryJob = null
+                callPeerSession?.let { startWebRtcMediaWatchdog(code, it) }
+                AppState.updateCall(code, AppState.CallPhase.ACTIVE)
+            }
             "answer" -> if (pairing.role == Role.SENDER && activeCallCode == code &&
                 lastCallState == TelephonyManager.CALL_STATE_OFFHOOK
             ) {
@@ -1106,7 +1167,7 @@ class RelayForegroundService : Service() {
                 startCallBridge(pairing)
             }
             "end" -> if (pairing.role == Role.SENDER) {
-                if (!endSenderCellularCall()) {
+                if (pendingOutgoingDial == null && !endSenderCellularCall()) {
                     val message = "Could not confirm remote hang-up. End the call on the sender phone."
                     sockets[code]?.send("call_control", JSONObject().put("action", "error").put("message", message))
                     completeLiveCall(code, "remote_hangup_failed", message)
@@ -1144,12 +1205,18 @@ class RelayForegroundService : Service() {
         // The durable cancel may arrive after a new call started. Never end an
         // unrelated cellular call or another pairing's request.
         if (activeCallCode != code || outgoingCallRequestId != requestId) return
-        if (!endSenderCellularCall()) {
+        if (pendingOutgoingDial == null && !endSenderCellularCall()) {
             AppState.setError("Could not end the cellular call remotely. End it on the sender phone.")
             return
         }
         reportOutgoingCall(code, requestId, "ended")
         completeLiveCall(code, "remote_hangup")
+    }
+
+    @Synchronized
+    private fun finishOutgoingCall(code: String, requestId: String, error: String?) {
+        if (activeCallCode != code || outgoingCallRequestId != requestId) return
+        completeLiveCall(code, if (error == null) "remote_ended" else "remote_failed", error)
     }
 
     private fun canControlPhoneCalls(): Boolean =
@@ -1164,6 +1231,8 @@ class RelayForegroundService : Service() {
         } ?: return
         activeCallCode = code
         outgoingCallRequestId = requestId
+        outgoingCellularConnected = false
+        outgoingDialIssued = false
         AppState.updateCall(code, AppState.CallPhase.CONNECTING, number = number)
         openTemporaryCallSocket(pairing)
     }
@@ -1198,8 +1267,9 @@ class RelayForegroundService : Service() {
         }
         activeCallCode = code
         outgoingCallRequestId = requestId
+        outgoingCellularConnected = false
+        outgoingDialIssued = false
         currentCallNumber = number
-        openTemporaryCallSocket(pairing)
         val telecom = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
         val accounts = telecom.callCapablePhoneAccounts
         val selectedInfo = getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList.orEmpty()
@@ -1212,13 +1282,75 @@ class RelayForegroundService : Service() {
             completeLiveCall(code, "dial_failed")
             return
         }
-        val extras = Bundle().putParcelableCompat(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
-        runCatching { telecom.placeCall(Uri.fromParts("tel", number, null), extras) }
-            .onSuccess { reportOutgoingCall(code, requestId, "dialing") }
-            .onFailure {
-                reportOutgoingCall(code, requestId, "failed", it.message ?: "Sender could not place the call")
-                completeLiveCall(code, "dial_failed")
+        pendingOutgoingDial = PendingOutgoingDial(requestId, number, handle)
+        preDialTimeoutJob?.cancel()
+        preDialTimeoutJob = scope.launch {
+            delay(PRE_DIAL_TIMEOUT_MS)
+            synchronized(this@RelayForegroundService) {
+                if (activeCallCode == code && pendingOutgoingDial?.requestId == requestId) {
+                    completeLiveCall(code, "pre_dial_timeout", "Could not connect both phones before dialing")
+                }
             }
+        }
+        AppState.updateCall(code, AppState.CallPhase.CONNECTING, "Connecting secure audio before dialing")
+        openTemporaryCallSocket(pairing)
+    }
+
+    @SuppressLint("MissingPermission") // placeOutgoingCall checks CALL_PHONE before preflight starts.
+    @Synchronized
+    private fun dialAfterPreflight(code: String, session: String) {
+        val pending = pendingOutgoingDial ?: return
+        if (activeCallCode != code || outgoingCallRequestId != pending.requestId ||
+            callPeerSession != session || !LiveCallControlPolicy.outgoingDialReady(
+                callPeerSession, preDialLocalReadySession, preDialRemoteReadySession,
+                sockets[code]?.isAuthenticated == true)
+        ) return
+        if (lastCallState != null && lastCallState != TelephonyManager.CALL_STATE_IDLE) {
+            completeLiveCall(code, "pre_dial_busy", "Sender phone became busy before dialing")
+            return
+        }
+        pendingOutgoingDial = null
+        preDialTimeoutJob?.cancel()
+        preDialTimeoutJob = null
+        preDialSignalRetryJob?.cancel()
+        preDialSignalRetryJob = null
+        val extras = Bundle().putParcelableCompat(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, pending.handle)
+        runCatching { (getSystemService(Context.TELECOM_SERVICE) as TelecomManager)
+            .placeCall(Uri.fromParts("tel", pending.number, null), extras) }
+            .onSuccess {
+                outgoingDialIssued = true
+                reportOutgoingCall(code, pending.requestId, "dialing")
+                sockets[code]?.send("call_control", JSONObject().put("action", "dialing")
+                    .put("session_id", session))
+            }
+            .onFailure {
+                reportOutgoingCall(code, pending.requestId, "failed", it.message ?: "Sender could not place the call")
+                completeLiveCall(code, "dial_failed", "Sender could not place the call")
+            }
+    }
+
+    @Synchronized
+    private fun startPreDialSignalRetry(code: String, session: String, action: String) {
+        preDialSignalRetryJob?.cancel()
+        preDialSignalRetryJob = scope.launch {
+            repeat((PRE_DIAL_TIMEOUT_MS / 1_000L).toInt()) {
+                delay(1_000L)
+                synchronized(this@RelayForegroundService) {
+                    if (activeCallCode != code || callPeerSession != session ||
+                        outgoingCallRequestId == null || outgoingCellularConnected) return@launch
+                    val waiting = when (action) {
+                        "connected" -> pendingOutgoingDial != null && preDialRemoteReadySession != session
+                        "preflight_ready" -> !outgoingDialIssued && preDialLocalReadySession == session
+                        else -> false
+                    }
+                    if (!waiting) return@launch
+                    sockets[code]?.send("call_control", JSONObject().put("action", action)
+                        .put("session_id", session).apply {
+                            if (action == "connected") put("transport", "webrtc")
+                        })
+                }
+            }
+        }
     }
 
     private fun Bundle.putParcelableCompat(key: String, value: android.os.Parcelable): Bundle = apply { putParcelable(key, value) }
@@ -1246,6 +1378,10 @@ class RelayForegroundService : Service() {
             ?.userMessage()
     }
 
+    private fun rendezvousTimeoutMs(): Long =
+        if (outgoingCallRequestId != null && !outgoingCellularConnected) PRE_DIAL_TIMEOUT_MS
+        else callTimeouts.rendezvousMs
+
     @Synchronized
     private fun startCallBridge(pairing: PairingInfo, provisionedIce: List<org.webrtc.PeerConnection.IceServer>? = null) {
         if (callAudioBridge != null || activeCallCode != pairing.code) return
@@ -1256,7 +1392,7 @@ class RelayForegroundService : Service() {
         if (pairing.role == Role.SENDER && !LiveCallControlPolicy.senderBridgeCanStart(
                 pairing.isFcmOnDemand, sockets[pairing.code]?.isAuthenticated == true)) {
             if (!reconnectTimeoutJobs.containsKey(pairing.code)) reconnectTimeoutJobs[pairing.code] = scope.launch {
-                delay(callTimeouts.rendezvousMs)
+                delay(rendezvousTimeoutMs())
                 synchronized(this@RelayForegroundService) {
                     if (activeCallCode == pairing.code) completeLiveCall(pairing.code,
                         if (callAudioBridge == null) "signaling_timeout" else "negotiation_timeout",
@@ -1302,7 +1438,7 @@ class RelayForegroundService : Service() {
             iceLoadingSession = session
             // Includes credential fetching. Peer replacement never resets this deadline.
             if (!reconnectTimeoutJobs.containsKey(pairing.code)) reconnectTimeoutJobs[pairing.code] = scope.launch {
-                delay(callTimeouts.rendezvousMs)
+                delay(rendezvousTimeoutMs())
                 synchronized(this@RelayForegroundService) {
                     if (activeCallCode == pairing.code) completeLiveCall(pairing.code,
                         "negotiation_timeout", "Could not connect WebRTC call audio")
@@ -1338,6 +1474,7 @@ class RelayForegroundService : Service() {
             sessionId = session,
             capability = if (pairing.role == Role.SENDER) gatewayCapability.get() else GatewayCapability.ROOT_UNAVAILABLE,
             iceServers = provisionedIce,
+            preDial = pairing.role == Role.SENDER && pendingOutgoingDial != null,
             sendSignal = { signal -> synchronized(this@RelayForegroundService) {
                 callPeerSession == session && activeCallCode == pairing.code &&
                     sockets[pairing.code]?.send("call_control", signal.put("action", "webrtc_signal")) == true
@@ -1360,6 +1497,8 @@ class RelayForegroundService : Service() {
                     if (sockets[pairing.code]?.send("call_control", JSONObject().put("action", "connected")
                             .put("transport", "webrtc").put("session_id", session)) != true) {
                         pauseCallForReconnect(pairing.code, "Call signaling disconnected")
+                    } else if (pendingOutgoingDial != null) {
+                        startPreDialSignalRetry(pairing.code, session, "connected")
                     }
                 }
             } },
@@ -1369,8 +1508,22 @@ class RelayForegroundService : Service() {
                         org.webrtc.PeerConnection.PeerConnectionState.CONNECTED -> {
                             callMetrics[pairing.code]?.connected()
                             reconnectTimeoutJobs.remove(pairing.code)?.cancel()
-                            startWebRtcMediaWatchdog(pairing.code, session)
-                            AppState.updateCall(pairing.code, AppState.CallPhase.ACTIVE)
+                            if (outgoingCallRequestId != null && !outgoingCellularConnected) {
+                                preDialLocalReadySession = session
+                                if ((pairing.role == Role.RECEIVER || pendingOutgoingDial != null) &&
+                                    sockets[pairing.code]?.send("call_control",
+                                        JSONObject().put("action", "preflight_ready")
+                                            .put("session_id", session)) != true) {
+                                    completeLiveCall(pairing.code, "pre_dial_signaling_failed",
+                                        "Call connection was lost before dialing")
+                                    return@synchronized
+                                }
+                                if (pairing.role == Role.SENDER) dialAfterPreflight(pairing.code, session)
+                                else startPreDialSignalRetry(pairing.code, session, "preflight_ready")
+                            } else {
+                                startWebRtcMediaWatchdog(pairing.code, session)
+                                AppState.updateCall(pairing.code, AppState.CallPhase.ACTIVE)
+                            }
                             updateCallForeground()
                         }
                         org.webrtc.PeerConnection.PeerConnectionState.DISCONNECTED,
@@ -1400,7 +1553,7 @@ class RelayForegroundService : Service() {
         promoteCallForeground()
         if (bridge.start()) {
             if (!reconnectTimeoutJobs.containsKey(pairing.code)) reconnectTimeoutJobs[pairing.code] = scope.launch {
-                delay(callTimeouts.rendezvousMs)
+                delay(rendezvousTimeoutMs())
                 synchronized(this@RelayForegroundService) {
                     // The deadline belongs to the call attempt, not a peer.
                     // Replacing a failed peer must not disable or reset it.
@@ -1478,7 +1631,36 @@ class RelayForegroundService : Service() {
         mediaWatchdogJobs.remove(code)?.cancel()
         lastMediaAt.remove(code)
         answerRetryJobs.remove(code)?.cancel()
+        preDialTimeoutJob?.cancel()
+        preDialTimeoutJob = null
+        preDialSignalRetryJob?.cancel()
+        preDialSignalRetryJob = null
         if (activeCallCode == code) {
+            if (outgoingCallRequestId != null &&
+                SessionStore.load(this).pairings.any { it.code == code && it.role == Role.RECEIVER } &&
+                reason !in setOf("cellular_ended", "remote_ended")) {
+                outgoingCallRequestId?.let { OutgoingCallRelay.enqueueCancel(this, code, it) }
+            }
+            val pending = pendingOutgoingDial
+            if (pending != null && outgoingCallRequestId == pending.requestId && reason != "remote_hangup") {
+                val message = error ?: "Could not connect both phones before dialing"
+                reportOutgoingCall(code, pending.requestId, "failed", message)
+                sockets[code]?.send("call_control", JSONObject().put("action", "error")
+                    .put("message", message).put("request_id", pending.requestId))
+            }
+            pendingOutgoingDial = null
+            if (outgoingCallRequestId != null && outgoingDialIssued && reason in setOf(
+                    "signaling_timeout", "negotiation_timeout", "webrtc_error", "reconnect_timeout",
+                    "audio_start_failed", "turn_unavailable", "audio_stop_timeout",
+                    "signaling_not_ready", "signaling_overflow", "remote_error", "session_timeout",
+                    "rtp_stall",
+                )) {
+                if (endSenderCellularCall()) outgoingCallRequestId?.let {
+                    reportOutgoingCall(code, it, "failed", error ?: "Call audio connection failed")
+                }
+            }
+            outgoingCellularConnected = false
+            outgoingDialIssued = false
             stopCallBridge()
             outgoingCallRequestId?.let { OutgoingCallRequestStore.clearIfCurrent(this, code, it) }
             outgoingCallRequestId = null
@@ -1528,6 +1710,10 @@ class RelayForegroundService : Service() {
         pendingWebRtcSignals.clear()
         callPeerSession = null
         callPeerReadySession = null
+        preDialLocalReadySession = null
+        preDialRemoteReadySession = null
+        preDialSignalRetryJob?.cancel()
+        preDialSignalRetryJob = null
         val bridge = callAudioBridge
         callAudioBridge = null
         if (bridge != null) {
@@ -1549,6 +1735,16 @@ class RelayForegroundService : Service() {
     }
 
     private fun stop(clearUiState: Boolean = true) {
+        pendingOutgoingDial?.let { pending ->
+            activeCallCode?.let { reportOutgoingCall(it, pending.requestId, "failed", "Relay stopped before dialing") }
+        }
+        pendingOutgoingDial = null
+        preDialTimeoutJob?.cancel()
+        preDialTimeoutJob = null
+        preDialSignalRetryJob?.cancel()
+        preDialSignalRetryJob = null
+        outgoingDialIssued = false
+        outgoingCellularConnected = false
         stopCallBridge()
         unansweredCallJobs.values.forEach { it.cancel() }
         unansweredCallJobs.clear()
@@ -1827,6 +2023,12 @@ class RelayForegroundService : Service() {
 
         fun cancelOutgoingCall(ctx: Context, code: String, requestId: String) {
             start(ctx, ACTION_CANCEL_OUTGOING_CALL, arrayOf("code" to code, "request_id" to requestId))
+        }
+
+        fun finishOutgoingCall(ctx: Context, code: String, requestId: String, error: String?) {
+            if (!serviceRunning) return
+            start(ctx, ACTION_FINISH_OUTGOING_CALL,
+                arrayOf("code" to code, "request_id" to requestId, "error" to error))
         }
 
         fun beginOutgoingCall(ctx: Context, code: String, requestId: String, number: String) {
